@@ -1,0 +1,6 @@
+{
+  "name": "Krishivantri Drone Pilot",
+  "description": "Standalone drone pilot app for Krishivantri: go online with live GPS telemetry, accept nearby farm spraying missions, top up wallet via Razorpay, and stream real-time arrival ETA.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
