@@ -64,6 +64,7 @@ data class LatLngPoint(
 data class UserEntity(
     @PrimaryKey val id: String = UUID.randomUUID().toString(),
     val phone: String,
+    val email: String = "",
     val name: String,
     val role: String, // 'admin', 'pilot', 'farmer'
     val createdAt: Long = System.currentTimeMillis()
@@ -244,4 +245,70 @@ data class LocationSnapshot(
     val provider: String = "gps",
     val timestamp: Long = System.currentTimeMillis()
 )
+
+enum class WithdrawalMethod(val apiValue: String, val label: String) {
+    BANK_TRANSFER("bank_transfer", "Bank Account"),
+    UPI("upi", "UPI ID");
+
+    companion object {
+        fun fromApi(value: String): WithdrawalMethod =
+            entries.firstOrNull { it.apiValue.equals(value, ignoreCase = true) } ?: BANK_TRANSFER
+    }
+}
+
+enum class WithdrawalStatus(val apiValue: String, val label: String) {
+    PROCESSING("processing", "Processing"),
+    COMPLETED("completed", "Credited to Bank"),
+    FAILED("failed", "Failed");
+
+    companion object {
+        fun fromApi(value: String): WithdrawalStatus =
+            entries.firstOrNull { it.apiValue.equals(value, ignoreCase = true) } ?: COMPLETED
+    }
+}
+
+@Entity(tableName = "pilot_bank_accounts")
+data class PilotBankAccountEntity(
+    @PrimaryKey val pilotId: String,
+    val accountHolderName: String,
+    val accountNumber: String,
+    val ifscCode: String,
+    val bankName: String = "",
+    val updatedAt: Long = System.currentTimeMillis()
+) {
+    fun maskedAccountNumber(): String {
+        val clean = accountNumber.trim()
+        return if (clean.length <= 4) clean else "••••${clean.takeLast(4)}"
+    }
+}
+
+@Entity(tableName = "pilot_withdrawals")
+data class PilotWithdrawalEntity(
+    @PrimaryKey val id: String = UUID.randomUUID().toString(),
+    val pilotId: String,
+    val amount: Double,
+    val method: String = WithdrawalMethod.BANK_TRANSFER.apiValue,
+    val accountHolderName: String = "",
+    val bankAccountNumber: String = "",
+    val ifscCode: String = "",
+    val bankName: String = "",
+    val upiId: String = "",
+    val referenceId: String = "",
+    val status: String = WithdrawalStatus.COMPLETED.apiValue,
+    val createdAt: Long = System.currentTimeMillis()
+) {
+    val methodEnum: WithdrawalMethod get() = WithdrawalMethod.fromApi(method)
+    val statusEnum: WithdrawalStatus get() = WithdrawalStatus.fromApi(status)
+
+    fun destinationSummary(): String {
+        return if (methodEnum == WithdrawalMethod.UPI) {
+            "UPI • $upiId"
+        } else {
+            val clean = bankAccountNumber.trim()
+            val masked = if (clean.length <= 4) clean else "••••${clean.takeLast(4)}"
+            val bankPrefix = bankName.trim().takeIf { it.isNotBlank() } ?: "Bank"
+            "$bankPrefix $masked ($ifscCode)"
+        }
+    }
+}
 

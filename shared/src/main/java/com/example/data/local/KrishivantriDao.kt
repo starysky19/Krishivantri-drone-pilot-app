@@ -9,7 +9,9 @@ import com.example.data.model.CommissionLogEntity
 import com.example.data.model.FarmBoundaryEntity
 import com.example.data.model.FarmerProfileEntity
 import com.example.data.model.OrderEntity
+import com.example.data.model.PilotBankAccountEntity
 import com.example.data.model.PilotProfileEntity
+import com.example.data.model.PilotWithdrawalEntity
 import com.example.data.model.RejectedOrderEntity
 import com.example.data.model.UserEntity
 import kotlinx.coroutines.flow.Flow
@@ -22,6 +24,9 @@ interface KrishivantriDao {
 
     @Query("SELECT * FROM users WHERE phone = :phone LIMIT 1")
     suspend fun getUserByPhone(phone: String): UserEntity?
+
+    @Query("SELECT * FROM users WHERE LOWER(email) = LOWER(:email) LIMIT 1")
+    suspend fun getUserByEmail(email: String): UserEntity?
 
     @Query("SELECT * FROM users WHERE id = :id LIMIT 1")
     suspend fun getUserById(id: String): UserEntity?
@@ -109,4 +114,25 @@ interface KrishivantriDao {
 
     @Query("DELETE FROM farm_boundaries WHERE id = :boundaryId")
     suspend fun deleteFarmBoundary(boundaryId: String)
+
+    @Query("SELECT * FROM pilot_bank_accounts WHERE pilotId = :pilotId LIMIT 1")
+    fun observePilotBankAccount(pilotId: String): Flow<PilotBankAccountEntity?>
+
+    @Query("SELECT * FROM pilot_bank_accounts WHERE pilotId = :pilotId LIMIT 1")
+    suspend fun getPilotBankAccount(pilotId: String): PilotBankAccountEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertPilotBankAccount(account: PilotBankAccountEntity)
+
+    @Query("SELECT * FROM pilot_withdrawals WHERE pilotId = :pilotId ORDER BY createdAt DESC")
+    fun observePilotWithdrawals(pilotId: String): Flow<List<PilotWithdrawalEntity>>
+
+    @Query("SELECT * FROM pilot_withdrawals WHERE pilotId = :pilotId ORDER BY createdAt DESC")
+    suspend fun getPilotWithdrawals(pilotId: String): List<PilotWithdrawalEntity>
+
+    @Query("SELECT * FROM orders WHERE assignedPilotId = :pilotId AND orderStatus = 'completed'")
+    suspend fun getCompletedOrdersByPilot(pilotId: String): List<OrderEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPilotWithdrawal(withdrawal: PilotWithdrawalEntity)
 }

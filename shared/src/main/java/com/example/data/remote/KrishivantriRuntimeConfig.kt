@@ -9,7 +9,7 @@ object KrishivantriRuntimeConfig {
     var apiBaseUrl: String = "https://api.krishivantri.in/api/v1/"
 
     @Volatile
-    var supabaseUrl: String = "https://leawuzhjkuzwgzdduwzq.supabase.co"
+    var supabaseUrl: String = ""
 
     @Volatile
     var supabaseAnonKey: String = "MY_SUPABASE_ANON_KEY"
@@ -27,28 +27,46 @@ object KrishivantriRuntimeConfig {
     @Volatile
     var isDebugLogging: Boolean = false
 
+    fun cleanSecret(raw: String): String =
+        raw.trim().trim('"', '\'').trim()
+
     fun isRazorpayConfigured(): Boolean {
-        val key = razorpayKeyId.trim()
+        val key = cleanSecret(razorpayKeyId)
         return key.startsWith("rzp_") && !key.contains("MY_RAZORPAY") && !key.contains("placeholder")
     }
 
     fun normalizeSupabaseBaseUrl(rawUrl: String): String {
-        val trimmed = rawUrl.trim().trimEnd('/')
-        if (trimmed.isBlank()) return ""
+        val trimmed = cleanSecret(rawUrl).trimEnd('/')
+        if (trimmed.isBlank() ||
+            trimmed.contains("your-project", ignoreCase = true) ||
+            trimmed.startsWith("MY_SUPABASE", ignoreCase = true)
+        ) {
+            return ""
+        }
+        val withScheme = when {
+            trimmed.startsWith("https://", ignoreCase = true) -> trimmed
+            trimmed.startsWith("http://localhost", ignoreCase = true) ||
+                trimmed.startsWith("http://127.0.0.1", ignoreCase = true) -> trimmed
+            trimmed.startsWith("http://", ignoreCase = true) ->
+                "https://" + trimmed.removePrefix("http://").removePrefix("HTTP://")
+            !trimmed.contains(".") && !trimmed.contains("/") ->
+                "https://$trimmed.supabase.co"
+            else -> "https://$trimmed"
+        }
         return runCatching {
-            val uri = java.net.URI(trimmed)
+            val uri = java.net.URI(withScheme)
             val scheme = uri.scheme
             val authority = uri.authority
             if (!scheme.isNullOrBlank() && !authority.isNullOrBlank()) {
-                "$scheme://$authority"
+                "${scheme.lowercase()}://$authority"
             } else {
-                trimmed
+                withScheme
                     .replace(Regex("/rest/v1.*$"), "")
                     .replace(Regex("/realtime/v1.*$"), "")
                     .trimEnd('/')
             }
         }.getOrElse {
-            trimmed
+            withScheme
                 .replace(Regex("/rest/v1.*$"), "")
                 .replace(Regex("/realtime/v1.*$"), "")
                 .trimEnd('/')
@@ -64,12 +82,19 @@ object KrishivantriRuntimeConfig {
         satelliteApiKey: String = this.satelliteApiKey,
         isDebugLogging: Boolean = false
     ) {
-        this.apiBaseUrl = apiBaseUrl
+        val cleanedBase = cleanSecret(apiBaseUrl)
+        this.apiBaseUrl = if (cleanedBase.isBlank()) {
+            this.apiBaseUrl
+        } else if (cleanedBase.endsWith("/")) {
+            cleanedBase
+        } else {
+            "$cleanedBase/"
+        }
         this.supabaseUrl = normalizeSupabaseBaseUrl(supabaseUrl)
-        this.supabaseAnonKey = supabaseAnonKey
-        this.razorpayKeyId = razorpayKeyId
-        this.satelliteTileUrl = satelliteTileUrl
-        this.satelliteApiKey = satelliteApiKey
+        this.supabaseAnonKey = cleanSecret(supabaseAnonKey)
+        this.razorpayKeyId = cleanSecret(razorpayKeyId)
+        this.satelliteTileUrl = cleanSecret(satelliteTileUrl)
+        this.satelliteApiKey = cleanSecret(satelliteApiKey)
         this.isDebugLogging = isDebugLogging
     }
 }

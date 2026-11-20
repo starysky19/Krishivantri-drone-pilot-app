@@ -2,9 +2,17 @@ package com.example.ui.viewmodel
 
 import android.app.Application
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.local.KrishivantriDatabase
+import com.example.data.local.PersistedAuthSession
+import com.example.data.local.SessionTokenStore
+import com.example.data.remote.CloudStatusSnapshot
+import com.example.data.remote.SupabaseClient
 import com.example.data.model.CommissionLogEntity
 import com.example.data.model.DailyOrderVolume
 import com.example.data.model.DroneType
@@ -20,10 +28,13 @@ import com.example.data.model.OperatorRoleType
 import com.example.data.model.OrderStatus
 import com.example.data.model.OrderWithDetails
 import com.example.data.model.PaymentMethod
+import com.example.data.model.PilotBankAccountEntity
 import com.example.data.model.PilotPerformanceStat
 import com.example.data.model.PilotProfileEntity
+import com.example.data.model.PilotWithdrawalEntity
 import com.example.data.model.UserEntity
 import com.example.data.model.UserRole
+import com.example.data.model.WithdrawalMethod
 import com.example.data.repository.AcceptOrderResult
 import com.example.data.repository.AuthResult
 import com.example.data.repository.CloudSyncResult
@@ -31,11 +42,15 @@ import com.example.data.repository.FarmRepository
 import com.example.data.repository.KrishivantriRepository
 import com.example.data.repository.LocationRepository
 import com.example.data.repository.MapRepository
+import com.example.data.repository.OtpRequestResult
+import com.example.data.repository.SessionValidationResult
+import com.example.data.repository.WithdrawResult
 import com.example.domain.GeoPolygonCalculator
 import com.example.domain.LocationMatch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -48,6 +63,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class RazorpaySheetState(
     val title: String,
@@ -70,9 +86,24 @@ data class InsufficientWalletAlert(
     val currentBalance: Double
 )
 
+data class WithdrawSheetUiState(
+    val isVisible: Boolean = false,
+    val isSubmitting: Boolean = false,
+    val errorMessage: String? = null
+)
+
 data class AuthUiState(
     val selectedRole: UserRole = UserRole.FARMER,
     val isSignUpMode: Boolean = true,
+    val emailInput: String = "",
+    val otpInput: String = "",
+    val isOtpStep: Boolean = false,
+    val otpNoticeMessage: String? = null,
+    val resendCooldownSeconds: Int = 0,
+    val otpExpiresRemainingSeconds: Int = 0,
+    val failedOtpAttempts: Int = 0,
+    val maxOtpAttempts: Int = 5,
+    val isRestoringSession: Boolean = true,
     val errorMessage: String? = null,
     val isLoading: Boolean = false
 )
@@ -110,10 +141,12 @@ data class MapBookingState(
 class KrishivantriViewModel(application: Application) : AndroidViewModel(application) {
 
     private val database = KrishivantriDatabase.getInstance(application)
-    private val repository = KrishivantriRepository(database)
+    private val repository = KrishivantriRepository(database, application)
     val locationRepository = LocationRepository(application)
     val farmRepository = FarmRepository(database.dao())
     val mapRepository = MapRepository(application, database.dao())
+
+    val cloudStatus: StateFlow<CloudStatusSnapshot> = SupabaseClient.cloudStatus
 
     private val _currentUser = MutableStateFlow<UserEntity?>(null)
     val currentUser: StateFlow<UserEntity?> = _currentUser.asStateFlow()
@@ -132,6 +165,9 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
     private val _insufficientWalletAlert = MutableStateFlow<InsufficientWalletAlert?>(null)
     val insufficientWalletAlert: StateFlow<InsufficientWalletAlert?> = _insufficientWalletAlert.asStateFlow()
 
+    private val _withdrawSheetState = MutableStateFlow(WithdrawSheetUiState())
+    val withdrawSheetState: StateFlow<WithdrawSheetUiState> = _withdrawSheetState.asStateFlow()
+
     private val _snackbarMessage = MutableStateFlow<String?>(null)
     val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
 
@@ -139,12 +175,139 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
     private var pilotLiveLocationJob: Job? = null
     private var farmerSupabaseSyncJob: Job? = null
     private var pilotSupabaseSyncJob: Job? = null
+    private var otpCountdownJob: Job? = null
+    private var connectivityManager: ConnectivityManager? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    private val sessionTokenStore = SessionTokenStore(application)
 
     init {
+        registerCloudNetworkMonitor(application)
         viewModelScope.launch {
             runCatching { repository.verifyLocalDatabaseReady() }
+            restorePersistedSession()
+            runCatching { repository.checkSupabaseConnection() }
             refreshOfflineRegions()
         }
+    }
+
+    private fun registerCloudNetworkMonitor(application: Application) {
+        runCatching {
+            val cm = application.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    viewModelScope.launch {
+                        repository.checkSupabaseConnection()
+                        val user = _currentUser.value
+                        if (user != null) {
+                            if (user.role.equals(UserRole.PILOT.apiValue, ignoreCase = true)) {
+                                repository.syncPilotStateFromSupabase(user.id)
+                            } else if (user.role.equals(UserRole.FARMER.apiValue, ignoreCase = true)) {
+                                repository.syncFarmerStateFromSupabase(user.id)
+                            }
+                        } else {
+                            repository.flushPendingCloudWrites()
+                        }
+                    }
+                }
+
+                override fun onLost(network: Network) {
+                    SupabaseClient.markSyncFailure("Network disconnected — retrying", offline = true)
+                }
+            }
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            cm.registerNetworkCallback(request, callback)
+            connectivityManager = cm
+            networkCallback = callback
+        }
+    }
+
+    private suspend fun restorePersistedSession() {
+        val savedSession = sessionTokenStore.load()
+        if (savedSession == null) {
+            _authState.update { it.copy(isRestoringSession = false) }
+            return
+        }
+
+        val localUser = runCatching { repository.getUserById(savedSession.userId) }.getOrNull()
+        if (localUser != null && _currentUser.value == null) {
+            _currentUser.value = localUser
+            activateAuthenticatedSessionJobs(localUser)
+        }
+        _authState.update { it.copy(isRestoringSession = false) }
+
+        when (val validation = repository.validateOrRefreshSession(savedSession)) {
+            is SessionValidationResult.Valid -> {
+                if (sessionTokenStore.load() != null) {
+                    persistAuthSession(
+                        user = validation.user,
+                        accessToken = validation.accessToken,
+                        refreshToken = validation.refreshToken,
+                        expiresAtEpochSec = validation.expiresAtEpochSec
+                    )
+                    _currentUser.value = validation.user
+                    activateAuthenticatedSessionJobs(validation.user)
+                }
+            }
+            SessionValidationResult.OfflineKeepLocal -> {
+                // Keep authenticated local user active until explicit Log Out
+            }
+            is SessionValidationResult.ExpiredOrRevoked -> {
+                sessionTokenStore.clear()
+                stopActiveSessionJobs()
+                _currentUser.value = null
+                _authState.update {
+                    it.copy(
+                        isSignUpMode = false,
+                        isOtpStep = false,
+                        errorMessage = validation.reason,
+                        isRestoringSession = false
+                    )
+                }
+            }
+        }
+    }
+
+    private fun activateAuthenticatedSessionJobs(user: UserEntity) {
+        if (user.role.equals(UserRole.PILOT.apiValue, ignoreCase = true)) {
+            syncPilotLiveLocationTracking(user)
+            startPilotSupabaseSync(user.id)
+        } else if (user.role.equals(UserRole.FARMER.apiValue, ignoreCase = true)) {
+            startFarmerSupabaseSync(user.id)
+        }
+    }
+
+    private fun stopActiveSessionJobs() {
+        stopBatteryEfficientGpsUpdates()
+        pilotLiveLocationJob?.cancel()
+        pilotLiveLocationJob = null
+        farmerSupabaseSyncJob?.cancel()
+        farmerSupabaseSyncJob = null
+        pilotSupabaseSyncJob?.cancel()
+        pilotSupabaseSyncJob = null
+    }
+
+    private fun persistAuthSession(
+        user: UserEntity,
+        accessToken: String,
+        refreshToken: String,
+        expiresAtEpochSec: Long
+    ) {
+        sessionTokenStore.save(
+            PersistedAuthSession(
+                userId = user.id,
+                email = user.email,
+                phone = user.phone,
+                role = user.role,
+                accessToken = accessToken,
+                refreshToken = refreshToken,
+                expiresAtEpochSec = expiresAtEpochSec,
+                loggedInAtMs = System.currentTimeMillis()
+            )
+        )
     }
 
     // Farmer reactive streams
@@ -217,6 +380,26 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val pilotBankAccount: StateFlow<PilotBankAccountEntity?> = _currentUser
+        .flatMapLatest { user ->
+            if (user?.role == UserRole.PILOT.apiValue) {
+                repository.observePilotBankAccount(user.id)
+            } else {
+                flowOf(null)
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    val pilotWithdrawals: StateFlow<List<PilotWithdrawalEntity>> = _currentUser
+        .flatMapLatest { user ->
+            if (user?.role == UserRole.PILOT.apiValue) {
+                repository.observePilotWithdrawals(user.id)
+            } else {
+                flowOf(emptyList())
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     // Admin-only reactive streams
     data class AdminOverviewState(
         val totalPilots: Int = 0,
@@ -268,7 +451,151 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun toggleAuthMode(isSignUp: Boolean) {
-        _authState.update { it.copy(isSignUpMode = isSignUp, errorMessage = null) }
+        _authState.update {
+            it.copy(
+                isSignUpMode = isSignUp,
+                isOtpStep = if (isSignUp) false else it.isOtpStep,
+                errorMessage = null
+            )
+        }
+    }
+
+    fun updateLoginEmail(email: String) {
+        _authState.update { it.copy(emailInput = email, errorMessage = null) }
+    }
+
+    fun updateOtpInput(otp: String) {
+        val filtered = otp.filter(Char::isDigit).take(6)
+        _authState.update { it.copy(otpInput = filtered, errorMessage = null) }
+    }
+
+    fun changeLoginEmail() {
+        otpCountdownJob?.cancel()
+        _authState.update {
+            it.copy(
+                isOtpStep = false,
+                otpInput = "",
+                otpNoticeMessage = null,
+                errorMessage = null,
+                failedOtpAttempts = 0
+            )
+        }
+    }
+
+    private fun startOtpCountdowns(cooldownSeconds: Int, expiresSeconds: Int) {
+        otpCountdownJob?.cancel()
+        otpCountdownJob = viewModelScope.launch {
+            var cooldown = cooldownSeconds.coerceAtLeast(0)
+            var expiry = expiresSeconds.coerceAtLeast(0)
+            while (isActive && (cooldown > 0 || expiry > 0)) {
+                delay(1_000L)
+                if (cooldown > 0) cooldown--
+                if (expiry > 0) expiry--
+                _authState.update { state ->
+                    state.copy(
+                        resendCooldownSeconds = cooldown,
+                        otpExpiresRemainingSeconds = expiry
+                    )
+                }
+            }
+        }
+    }
+
+    fun requestPilotLoginOtp(email: String = _authState.value.emailInput) {
+        val cleanEmail = KrishivantriRepository.normalizeEmail(email)
+        if (!KrishivantriRepository.isValidEmail(cleanEmail)) {
+            _authState.update {
+                it.copy(emailInput = email, errorMessage = "Enter a valid registered email address.")
+            }
+            return
+        }
+
+        viewModelScope.launch {
+            _authState.update {
+                it.copy(
+                    isLoading = true,
+                    emailInput = cleanEmail,
+                    errorMessage = null
+                )
+            }
+            when (val res = repository.requestPilotEmailOtp(cleanEmail)) {
+                is OtpRequestResult.Sent -> {
+                    _authState.update {
+                        it.copy(
+                            isLoading = false,
+                            isOtpStep = true,
+                            otpInput = "",
+                            otpNoticeMessage = res.message,
+                            resendCooldownSeconds = res.cooldownSeconds,
+                            otpExpiresRemainingSeconds = res.expiresInSeconds,
+                            failedOtpAttempts = 0,
+                            errorMessage = null
+                        )
+                    }
+                    startOtpCountdowns(res.cooldownSeconds, res.expiresInSeconds)
+                }
+                is OtpRequestResult.RateLimited -> {
+                    val currentExpiry = _authState.value.otpExpiresRemainingSeconds
+                    _authState.update {
+                        it.copy(
+                            isLoading = false,
+                            resendCooldownSeconds = res.waitSeconds,
+                            errorMessage = res.message
+                        )
+                    }
+                    startOtpCountdowns(res.waitSeconds, currentExpiry)
+                }
+                is OtpRequestResult.Error -> {
+                    _authState.update {
+                        it.copy(isLoading = false, errorMessage = res.message)
+                    }
+                }
+            }
+        }
+    }
+
+    fun verifyPilotLoginOtp(otp: String = _authState.value.otpInput) {
+        val state = _authState.value
+        val cleanOtp = otp.trim()
+        if (cleanOtp.length !in 6..8 || !cleanOtp.all(Char::isDigit)) {
+            _authState.update { it.copy(errorMessage = "Enter the 6-digit verification OTP from your email.") }
+            return
+        }
+        if (state.otpExpiresRemainingSeconds <= 0 && state.isOtpStep) {
+            _authState.update { it.copy(errorMessage = "OTP has expired. Tap Resend OTP to receive a new code.") }
+            return
+        }
+
+        viewModelScope.launch {
+            _authState.update { it.copy(isLoading = true, errorMessage = null) }
+            when (val result = repository.verifyPilotEmailOtp(state.emailInput, cleanOtp)) {
+                is AuthResult.Success -> {
+                    otpCountdownJob?.cancel()
+                    persistAuthSession(
+                        user = result.user,
+                        accessToken = result.accessToken,
+                        refreshToken = result.refreshToken,
+                        expiresAtEpochSec = result.expiresAtEpochSec
+                    )
+                    _currentUser.value = result.user
+                    _authState.value = AuthUiState(
+                        selectedRole = UserRole.PILOT,
+                        isSignUpMode = false,
+                        isRestoringSession = false
+                    )
+                    activateAuthenticatedSessionJobs(result.user)
+                }
+                is AuthResult.Error -> {
+                    _authState.update {
+                        it.copy(
+                            isLoading = false,
+                            failedOtpAttempts = it.failedOtpAttempts + 1,
+                            errorMessage = result.message
+                        )
+                    }
+                }
+            }
+        }
     }
 
     fun submitFarmerAuth(name: String, phone: String, farmerId: String) {
@@ -307,54 +634,76 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
 
     fun submitPilotAuth(
         name: String,
+        email: String,
         phone: String,
         droneType: DroneType,
         tankCapacityText: String,
         licenseUri: String,
         bankUpiId: String
     ) {
-        val isSignUp = _authState.value.isSignUpMode
+        if (!_authState.value.isSignUpMode) {
+            if (_authState.value.isOtpStep) {
+                verifyPilotLoginOtp(_authState.value.otpInput)
+            } else {
+                requestPilotLoginOtp(email)
+            }
+            return
+        }
+
+        val cleanEmail = KrishivantriRepository.normalizeEmail(email)
         val digits = phone.trim().filter(Char::isDigit)
+        if (name.isBlank()) {
+            _authState.update { it.copy(errorMessage = "Enter your full name.") }
+            return
+        }
+        if (!KrishivantriRepository.isValidEmail(cleanEmail)) {
+            _authState.update { it.copy(errorMessage = "Enter a valid email address.") }
+            return
+        }
         if (digits.length !in 10..15) {
             _authState.update { it.copy(errorMessage = "Enter a valid 10-digit contact number.") }
             return
         }
-        if (isSignUp) {
-            val tank = tankCapacityText.toDoubleOrNull()
-            if (name.isBlank() || tank == null || tank !in 1.0..200.0 || bankUpiId.isBlank()) {
-                _authState.update {
-                    it.copy(errorMessage = "Complete name, tank capacity (1–200L), and UPI/Bank details.")
-                }
-                return
+        val tank = tankCapacityText.toDoubleOrNull()
+        if (tank == null || tank !in 1.0..200.0 || bankUpiId.isBlank()) {
+            _authState.update {
+                it.copy(errorMessage = "Complete tank capacity (1–200L) and UPI/Bank details.")
             }
-            if (licenseUri.isBlank()) {
-                _authState.update {
-                    it.copy(errorMessage = "Please upload your Drone Pilot License for verification.")
-                }
-                return
+            return
+        }
+        if (licenseUri.isBlank()) {
+            _authState.update {
+                it.copy(errorMessage = "Please upload your Drone Pilot License for verification.")
             }
+            return
         }
 
         viewModelScope.launch {
             _authState.update { it.copy(isLoading = true, errorMessage = null) }
-            val result = if (isSignUp) {
-                repository.registerPilot(
-                    name = name,
-                    phone = digits,
-                    droneType = droneType,
-                    tankCapacity = tankCapacityText.toDouble(),
-                    licenseDocumentUri = licenseUri,
-                    bankUpiId = bankUpiId
-                )
-            } else {
-                repository.loginByRole(digits, UserRole.PILOT)
-            }
+            val result = repository.registerPilot(
+                name = name,
+                email = cleanEmail,
+                phone = digits,
+                droneType = droneType,
+                tankCapacity = tank,
+                licenseDocumentUri = licenseUri,
+                bankUpiId = bankUpiId
+            )
             when (result) {
                 is AuthResult.Success -> {
+                    persistAuthSession(
+                        user = result.user,
+                        accessToken = result.accessToken,
+                        refreshToken = result.refreshToken,
+                        expiresAtEpochSec = result.expiresAtEpochSec
+                    )
                     _currentUser.value = result.user
-                    _authState.update { it.copy(isLoading = false) }
-                    syncPilotLiveLocationTracking(result.user)
-                    startPilotSupabaseSync(result.user.id)
+                    _authState.value = AuthUiState(
+                        selectedRole = UserRole.PILOT,
+                        isSignUpMode = true,
+                        isRestoringSession = false
+                    )
+                    activateAuthenticatedSessionJobs(result.user)
                 }
                 is AuthResult.Error -> {
                     _authState.update { it.copy(isLoading = false, errorMessage = result.message) }
@@ -373,19 +722,28 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun signOut() {
-        stopBatteryEfficientGpsUpdates()
-        pilotLiveLocationJob?.cancel()
-        pilotLiveLocationJob = null
-        farmerSupabaseSyncJob?.cancel()
-        farmerSupabaseSyncJob = null
-        pilotSupabaseSyncJob?.cancel()
-        pilotSupabaseSyncJob = null
+        val currentToken = sessionTokenStore.load()?.accessToken
+        otpCountdownJob?.cancel()
+        otpCountdownJob = null
+        stopActiveSessionJobs()
+        sessionTokenStore.clear()
         _currentUser.value = null
+        _authState.value = AuthUiState(
+            selectedRole = UserRole.PILOT,
+            isSignUpMode = false,
+            isRestoringSession = false
+        )
         _mapBookingState.value = MapBookingState(
             hasLocationPermission = locationRepository.hasFineOrCoarsePermission()
         )
         _razorpaySheet.value = null
         _insufficientWalletAlert.value = null
+        _withdrawSheetState.value = WithdrawSheetUiState()
+        viewModelScope.launch {
+            withContext(NonCancellable) {
+                repository.logoutFromBackend(currentToken)
+            }
+        }
     }
 
     // --- GPS & Location Permission Actions ---
@@ -813,11 +1171,49 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
             while (isActive) {
                 try {
                     repository.syncPilotStateFromSupabase(pilotId)
+                    val user = _currentUser.value
+                    val profile = pilotProfile.value
+                    if (user != null && profile?.isOnline == true) {
+                        val loc = _mapBookingState.value.currentGpsLocation
+                        val lat = loc?.lat ?: profile.currentLat
+                        val lng = loc?.lng ?: profile.currentLng
+                        if (lat != null && lng != null) {
+                            mapRepository.publishOperatorLocation(
+                                operatorId = user.id,
+                                name = user.name,
+                                roleType = if (profile.droneType == DroneType.HEXACOPTER.apiValue) {
+                                    OperatorRoleType.DRONE_OPERATOR
+                                } else {
+                                    OperatorRoleType.DRONE_MITRA
+                                },
+                                lat = lat,
+                                lng = lng,
+                                droneType = profile.droneType,
+                                isAvailable = true,
+                                headingDegrees = loc?.bearing ?: 0f
+                            )
+                        }
+                    }
                 } catch (ce: CancellationException) {
                     throw ce
                 } catch (_: Throwable) {
                 }
-                delay(12_000L)
+                delay(10_000L)
+            }
+        }
+    }
+
+    fun retryCloudConnection() {
+        viewModelScope.launch {
+            val status = repository.checkSupabaseConnection()
+            val user = _currentUser.value
+            if (user != null && user.role.equals(UserRole.PILOT.apiValue, ignoreCase = true)) {
+                repository.syncPilotStateFromSupabase(user.id)
+            } else if (user != null && user.role.equals(UserRole.FARMER.apiValue, ignoreCase = true)) {
+                repository.syncFarmerStateFromSupabase(user.id)
+            }
+            if (status.state != com.example.data.remote.CloudConnectionState.CONNECTED) {
+                _snackbarMessage.value = status.detailMessage
             }
         }
     }
@@ -837,13 +1233,16 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
     fun refreshPilotSync() {
         val pilotId = _currentUser.value?.id ?: return
         viewModelScope.launch {
+            repository.checkSupabaseConnection()
             when (repository.syncPilotStateFromSupabase(pilotId)) {
                 is CloudSyncResult.Success -> {
-                    _snackbarMessage.value = "Latest spray bookings updated."
+                    _snackbarMessage.value = "Latest spray bookings synced."
                 }
-                CloudSyncResult.NotConfigured,
+                CloudSyncResult.NotConfigured -> {
+                    _snackbarMessage.value = "Sync service is currently unavailable."
+                }
                 is CloudSyncResult.Error -> {
-                    _snackbarMessage.value = "Unable to refresh right now. Please try again."
+                    _snackbarMessage.value = "Unable to refresh right now. Retrying automatically."
                 }
             }
         }
@@ -1016,6 +1415,89 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
         _insufficientWalletAlert.value = null
     }
 
+    fun openWithdrawSheet() {
+        _withdrawSheetState.value = WithdrawSheetUiState(isVisible = true)
+    }
+
+    fun dismissWithdrawSheet() {
+        _withdrawSheetState.value = WithdrawSheetUiState(isVisible = false)
+    }
+
+    fun clearWithdrawError() {
+        _withdrawSheetState.update { it.copy(errorMessage = null) }
+    }
+
+    fun savePilotBankAccount(
+        accountHolderName: String,
+        accountNumber: String,
+        ifscCode: String,
+        bankName: String
+    ) {
+        val pilotId = _currentUser.value?.id ?: return
+        viewModelScope.launch {
+            when (
+                val result = repository.savePilotBankAccount(
+                    pilotId = pilotId,
+                    accountHolderName = accountHolderName,
+                    accountNumber = accountNumber,
+                    ifscCode = ifscCode,
+                    bankName = bankName
+                )
+            ) {
+                is AuthResult.Success -> {
+                    _snackbarMessage.value = "Bank payout account saved."
+                }
+                is AuthResult.Error -> {
+                    _snackbarMessage.value = result.message
+                }
+            }
+        }
+    }
+
+    fun submitPilotWithdrawal(
+        amountText: String,
+        method: WithdrawalMethod,
+        accountHolderName: String,
+        bankAccountNumber: String,
+        ifscCode: String,
+        bankName: String,
+        upiId: String
+    ) {
+        val pilotId = _currentUser.value?.id ?: return
+        val parsedAmount = amountText.trim().toDoubleOrNull()
+        if (parsedAmount == null || parsedAmount < 1.0) {
+            _withdrawSheetState.update { it.copy(errorMessage = "Enter a valid withdrawal amount (minimum ₹1).") }
+            return
+        }
+        viewModelScope.launch {
+            _withdrawSheetState.update { it.copy(isSubmitting = true, errorMessage = null) }
+            when (
+                val result = repository.withdrawPilotEarnings(
+                    pilotId = pilotId,
+                    amount = parsedAmount,
+                    method = method,
+                    accountHolderName = accountHolderName,
+                    bankAccountNumber = bankAccountNumber,
+                    ifscCode = ifscCode,
+                    bankName = bankName,
+                    upiId = upiId
+                )
+            ) {
+                is WithdrawResult.Success -> {
+                    _withdrawSheetState.value = WithdrawSheetUiState(isVisible = false)
+                    val w = result.withdrawal
+                    _snackbarMessage.value =
+                        "₹${w.amount.toInt()} withdrawal initiated to ${w.destinationSummary()} (Ref: ${w.referenceId})."
+                }
+                is WithdrawResult.Error -> {
+                    _withdrawSheetState.update {
+                        it.copy(isSubmitting = false, errorMessage = result.message)
+                    }
+                }
+            }
+        }
+    }
+
     // --- Admin Actions ---
 
     fun verifyPilotLicense(pilotId: String, verified: Boolean) {
@@ -1035,6 +1517,14 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
 
     override fun onCleared() {
         super.onCleared()
+        runCatching {
+            val cb = networkCallback
+            if (cb != null) {
+                connectivityManager?.unregisterNetworkCallback(cb)
+            }
+        }
+        networkCallback = null
+        connectivityManager = null
         stopBatteryEfficientGpsUpdates()
         pilotLiveLocationJob?.cancel()
         farmerSupabaseSyncJob?.cancel()

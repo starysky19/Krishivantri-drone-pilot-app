@@ -1,12 +1,20 @@
 from django.contrib import admin
-from .models import CommissionLog, CustomUser, FarmerProfile, Order, PilotProfile
+from .models import CommissionLog, CustomUser, EmailOTP, FarmerProfile, Order, PilotProfile
 
 
 @admin.register(CustomUser)
 class CustomUserAdmin(admin.ModelAdmin):
-    list_display = ("name", "phone", "role", "created_at")
+    list_display = ("name", "email", "phone", "role", "created_at")
     list_filter = ("role",)
-    search_fields = ("name", "phone")
+    search_fields = ("name", "email", "phone")
+
+
+@admin.register(EmailOTP)
+class EmailOTPAdmin(admin.ModelAdmin):
+    list_display = ("email", "is_used", "attempt_count", "expires_at", "created_at")
+    list_filter = ("is_used",)
+    search_fields = ("email",)
+    readonly_fields = ("email", "otp_hash", "salt", "expires_at", "attempt_count", "is_used", "created_at")
 
 
 @admin.register(PilotProfile)

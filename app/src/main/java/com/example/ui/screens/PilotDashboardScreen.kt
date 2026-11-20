@@ -93,7 +93,9 @@ import com.example.data.model.OperatorLocationMarker
 import com.example.data.model.OrderStatus
 import com.example.data.model.OrderWithDetails
 import com.example.data.model.PaymentMethod
+import com.example.data.model.PilotBankAccountEntity
 import com.example.data.model.PilotProfileEntity
+import com.example.data.model.PilotWithdrawalEntity
 import com.example.data.model.UserEntity
 import com.example.data.repository.MapRepository
 import com.example.domain.GeoPolygonCalculator
@@ -117,6 +119,8 @@ import java.util.Locale
 fun PilotDashboardScreen(
     user: UserEntity,
     profile: PilotProfileEntity?,
+    bankAccount: PilotBankAccountEntity?,
+    withdrawals: List<PilotWithdrawalEntity>,
     mapRepository: MapRepository,
     mapState: MapBookingState,
     queueOrders: List<OrderWithDetails>,
@@ -139,7 +143,9 @@ fun PilotDashboardScreen(
     onStartSpraying: (String) -> Unit,
     onCompleteOrder: (String) -> Unit,
     onOpenWalletTopUp: (Double) -> Unit,
+    onOpenWithdrawSheet: () -> Unit,
     onUpdateAccountDetails: (String, DroneType, String, String, String?) -> Unit,
+    onSaveBankAccount: (String, String, String, String) -> Unit,
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier,
     onSilentSync: () -> Unit = {}
@@ -286,7 +292,7 @@ fun PilotDashboardScreen(
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Rounded.Logout,
-                            contentDescription = "Sign Out",
+                            contentDescription = "Log Out",
                             tint = ForestGreen
                         )
                     }
@@ -397,7 +403,10 @@ fun PilotDashboardScreen(
 
                 2 -> PilotEarningsWalletTab(
                     profile = profile,
+                    bankAccount = bankAccount,
+                    withdrawals = withdrawals,
                     completedMissions = completedMissions,
+                    onOpenWithdrawSheet = onOpenWithdrawSheet,
                     onOpenWalletTopUp = onOpenWalletTopUp,
                     onEditAccountUpi = { selectedTab = 3 }
                 )
@@ -405,7 +414,9 @@ fun PilotDashboardScreen(
                 else -> PilotAccountDetailsTab(
                     user = user,
                     profile = profile,
+                    bankAccount = bankAccount,
                     onSaveAccountDetails = onUpdateAccountDetails,
+                    onSaveBankAccount = onSaveBankAccount,
                     onSignOut = onSignOut
                 )
             }
@@ -1102,197 +1113,3 @@ private fun PilotMapControlButton(
     }
 }
 
-@Composable
-private fun PilotEarningsWalletTab(
-    profile: PilotProfileEntity?,
-    completedMissions: List<OrderWithDetails>,
-    onOpenWalletTopUp: (Double) -> Unit,
-    onEditAccountUpi: () -> Unit
-) {
-    val totalNetEarnings = completedMissions.sumOf { it.order.pilotEarnings }
-
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.TopCenter
-    ) {
-        LazyColumn(
-            modifier = Modifier
-                .widthIn(max = 620.dp)
-                .fillMaxSize(),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            item {
-                Surface(
-                    shape = RoundedCornerShape(22.dp),
-                    color = SoftSage,
-                    border = BorderStroke(1.dp, ForestGreen.copy(alpha = 0.4f)),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(18.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Text(
-                            text = "Total Net Pilot Earnings (90%)",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = ForestGreen
-                        )
-                        Text(
-                            text = formatInr(totalNetEarnings),
-                            style = MaterialTheme.typography.headlineMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = ForestGreen
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = "Completed Jobs: ${completedMissions.size}",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = ForestGreen
-                            )
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Star,
-                                    contentDescription = null,
-                                    tint = HarvestAmber,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Text(
-                                    text = "${String.format(Locale.US, "%.1f", profile?.ratingAverage ?: 5.0)} (${profile?.ratingCount ?: 0} reviews)",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = HarvestAmber
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            item {
-                Surface(
-                    shape = RoundedCornerShape(22.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(18.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Text(
-                            text = "Razorpay Commission Wallet",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = ForestGreen
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Balance: ${formatInr(profile?.walletBalance ?: 0.0)} • UPI: ${profile?.bankUpiId ?: "-"}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.weight(1f)
-                            )
-                            TextButton(
-                                onClick = onEditAccountUpi,
-                                modifier = Modifier.testTag("pilot_earnings_edit_upi_button")
-                            ) {
-                                Text("Edit UPI", color = ForestGreen, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            listOf(250.0, 500.0, 1000.0).forEach { amt ->
-                                OutlinedButton(
-                                    onClick = { onOpenWalletTopUp(amt) },
-                                    shape = RoundedCornerShape(12.dp),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .height(48.dp)
-                                        .testTag("pilot_topup_preset_${amt.toInt()}")
-                                ) {
-                                    Text("+${formatInr(amt)}", color = ForestGreen, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (completedMissions.isEmpty()) {
-                item {
-                    Surface(
-                        shape = RoundedCornerShape(18.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = "No completed spray jobs yet. Accept and finish farm jobs to see payouts and farmer ratings here.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(20.dp)
-                        )
-                    }
-                }
-            } else {
-                items(completedMissions, key = { it.order.id }) { mission ->
-                    Surface(
-                        shape = RoundedCornerShape(18.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(14.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = mission.order.locationAddress,
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = "${mission.farmerName} • ${String.format(Locale.US, "%.2f", mission.order.acresToSpray)} ac • ${mission.paymentMethodEnum.label}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Column(horizontalAlignment = Alignment.End) {
-                                Text(
-                                    text = "+${formatInr(mission.order.pilotEarnings)}",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = EmeraldPulse
-                                )
-                                val rating = mission.order.pilotRating
-                                if (rating != null) {
-                                    Text(
-                                        text = "${rating}★ rated",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = HarvestAmber
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}

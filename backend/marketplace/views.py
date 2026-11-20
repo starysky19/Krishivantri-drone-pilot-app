@@ -7,7 +7,7 @@ from rest_framework.authtoken.models import Token
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 
-from .models import CommissionLog, CustomUser, FarmerProfile, Order, PilotProfile
+from .models import CommissionLog, CustomUser, EmailOTP, FarmerProfile, Order, PilotProfile
 from .serializers import (
     CommissionLogSerializer,
     FarmerProfileSerializer,
@@ -15,12 +15,18 @@ from .serializers import (
     PilotProfileSerializer,
 )
 from .services import (
+    OTP_COOLDOWN_SECONDS,
+    OTP_EXPIRY_SECONDS,
     accept_order_atomic,
     calculate_polygon_area_acres,
     calculate_tariff_split,
     complete_order_atomic,
     compute_pilot_priority_score,
     create_razorpay_order,
+    is_valid_email_format,
+    issue_email_otp,
+    normalize_email,
+    verify_email_otp,
 )
 
 
@@ -37,14 +43,26 @@ class IsKrishivantriAdmin(permissions.BasePermission):
 @permission_classes([permissions.AllowAny])
 def register_pilot(request):
     data = request.data
-    phone = data.get("phone", "").strip()
+    name = (data.get("name") or "").strip()
+    phone = (data.get("phone") or "").strip()
+    email = normalize_email(data.get("email") or "")
+
+    if not name:
+        return Response({"detail": "Full name is required."}, status=status.HTTP_400_BAD_REQUEST)
+    if not email or not is_valid_email_format(email):
+        return Response({"detail": "A valid email address is required."}, status=status.HTTP_400_BAD_REQUEST)
+    if not phone:
+        return Response({"detail": "Phone number is required."}, status=status.HTTP_400_BAD_REQUEST)
+    if CustomUser.objects.filter(email__iexact=email).exists():
+        return Response({"detail": "Email address is already registered."}, status=status.HTTP_400_BAD_REQUEST)
     if CustomUser.objects.filter(phone=phone).exists():
         return Response({"detail": "Phone already registered."}, status=status.HTTP_400_BAD_REQUEST)
 
     with transaction.atomic():
         user = CustomUser.objects.create_user(
             phone=phone,
-            name=data.get("name", ""),
+            email=email,
+            name=name,
             role="pilot",
         )
         PilotProfile.objects.create(
@@ -57,7 +75,14 @@ def register_pilot(request):
         )
         token, _ = Token.objects.get_or_create(user=user)
     return Response(
-        {"user_id": str(user.id), "name": user.name, "phone": user.phone, "role": user.role, "token": token.key},
+        {
+            "user_id": str(user.id),
+            "name": user.name,
+            "email": user.email or "",
+            "phone": user.phone,
+            "role": user.role,
+            "token": token.key,
+        },
         status=status.HTTP_201_CREATED,
     )
 
@@ -82,9 +107,77 @@ def register_farmer(request):
         )
         token, _ = Token.objects.get_or_create(user=user)
     return Response(
-        {"user_id": str(user.id), "name": user.name, "phone": user.phone, "role": user.role, "token": token.key},
+        {
+            "user_id": str(user.id),
+            "name": user.name,
+            "email": user.email or "",
+            "phone": user.phone,
+            "role": user.role,
+            "token": token.key,
+        },
         status=status.HTTP_201_CREATED,
     )
+
+
+@api_view(["POST"])
+@permission_classes([permissions.AllowAny])
+def request_email_otp(request):
+    email = request.data.get("email", "")
+    ok, http_status, message = issue_email_otp(email)
+    return Response(
+        {
+            "success": ok,
+            "message": message,
+            "cooldown_seconds": OTP_COOLDOWN_SECONDS,
+            "expires_in_seconds": OTP_EXPIRY_SECONDS,
+        },
+        status=http_status,
+    )
+
+
+@api_view(["POST"])
+@permission_classes([permissions.AllowAny])
+def verify_email_otp_view(request):
+    email = request.data.get("email", "")
+    otp = request.data.get("otp", "")
+    role = (request.data.get("role") or "pilot").strip()
+    ok, http_status, message, user, token_key = verify_email_otp(email, otp, expected_role=role)
+    if not ok or user is None or not token_key:
+        return Response({"detail": message}, status=http_status)
+    return Response(
+        {
+            "user_id": str(user.id),
+            "name": user.name,
+            "email": user.email or "",
+            "phone": user.phone,
+            "role": user.role,
+            "token": token_key,
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
+@api_view(["GET"])
+def validate_session_view(request):
+    user = request.user
+    token_key = getattr(request.auth, "key", "")
+    return Response(
+        {
+            "user_id": str(user.id),
+            "name": user.name,
+            "email": user.email or "",
+            "phone": user.phone,
+            "role": user.role,
+            "token": token_key,
+        }
+    )
+
+
+@api_view(["POST"])
+def logout_view(request):
+    if request.auth:
+        request.auth.delete()
+    return Response({"success": True, "message": "Logged out successfully."})
 
 
 @api_view(["POST"])
@@ -92,6 +185,11 @@ def register_farmer(request):
 def login_view(request):
     phone = request.data.get("phone", "").strip()
     role = request.data.get("role", "").strip()
+    if role == "pilot":
+        return Response(
+            {"detail": "Pilot login requires Email OTP verification."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     user = CustomUser.objects.filter(phone=phone, role=role).first()
     if not user:
         return Response({"detail": "Invalid credentials."}, status=status.HTTP_401_UNAUTHORIZED)
@@ -101,7 +199,14 @@ def login_view(request):
             return Response({"detail": "Invalid admin credentials."}, status=status.HTTP_401_UNAUTHORIZED)
     token, _ = Token.objects.get_or_create(user=user)
     return Response(
-        {"user_id": str(user.id), "name": user.name, "phone": user.phone, "role": user.role, "token": token.key}
+        {
+            "user_id": str(user.id),
+            "name": user.name,
+            "email": user.email or "",
+            "phone": user.phone,
+            "role": user.role,
+            "token": token.key,
+        }
     )
 
 

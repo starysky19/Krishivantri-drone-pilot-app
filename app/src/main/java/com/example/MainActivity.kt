@@ -5,25 +5,39 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.model.OrderStatus
+import com.example.data.model.PaymentMethod
 import com.example.data.model.UserRole
+import com.example.data.model.WithdrawalStatus
 import com.example.data.remote.KrishivantriRuntimeConfig
 import com.example.ui.components.InsufficientWalletDialog
 import com.example.ui.components.RazorpayCheckoutSheet
 import com.example.ui.screens.AdminDashboardScreen
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.PilotDashboardScreen
+import com.example.ui.screens.PilotWithdrawBottomSheet
+import com.example.ui.theme.ForestGreen
 import com.example.ui.theme.KrishivantriTheme
 import com.example.ui.viewmodel.KrishivantriViewModel
 import com.example.ui.viewmodel.RazorpaySheetState
@@ -42,9 +56,7 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
         super.onCreate(savedInstanceState)
         KrishivantriRuntimeConfig.configure(
             apiBaseUrl = BuildConfig.API_BASE_URL,
-            supabaseUrl = BuildConfig.SUPABASE_URL
-                .takeIf { it.isNotBlank() && !it.contains("your-project") }
-                ?: KrishivantriRuntimeConfig.supabaseUrl,
+            supabaseUrl = BuildConfig.SUPABASE_URL,
             supabaseAnonKey = BuildConfig.SUPABASE_ANON_KEY,
             razorpayKeyId = BuildConfig.RAZORPAY_KEY_ID,
             satelliteTileUrl = BuildConfig.SATELLITE_TILE_URL,
@@ -89,6 +101,9 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
                 viewModel.currentUser.value?.phone?.takeIf { it.isNotBlank() }?.let {
                     prefill.put("contact", it)
                 }
+                viewModel.currentUser.value?.email?.takeIf { it.isNotBlank() }?.let {
+                    prefill.put("email", it)
+                }
                 put("prefill", prefill)
             }
             checkout.open(this, options)
@@ -117,10 +132,13 @@ fun KrishivantriPilotApp(
     val pilotProfile by viewModel.pilotProfile.collectAsStateWithLifecycle()
     val pilotQueueOrders by viewModel.pilotQueueOrders.collectAsStateWithLifecycle()
     val pilotAssignedOrders by viewModel.pilotAssignedOrders.collectAsStateWithLifecycle()
+    val pilotBankAccount by viewModel.pilotBankAccount.collectAsStateWithLifecycle()
+    val pilotWithdrawals by viewModel.pilotWithdrawals.collectAsStateWithLifecycle()
     val realtimeOperators by viewModel.realtimeOperators.collectAsStateWithLifecycle()
     val adminOverview by viewModel.adminOverview.collectAsStateWithLifecycle()
     val razorpaySheet by viewModel.razorpaySheet.collectAsStateWithLifecycle()
     val insufficientWalletAlert by viewModel.insufficientWalletAlert.collectAsStateWithLifecycle()
+    val withdrawSheetState by viewModel.withdrawSheetState.collectAsStateWithLifecycle()
     val snackbarMessage by viewModel.snackbarMessage.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -147,11 +165,36 @@ fun KrishivantriPilotApp(
         ) {
             val user = currentUser
             if (user == null) {
-                AuthScreen(
-                    state = authState,
-                    onToggleSignUp = viewModel::toggleAuthMode,
-                    onSubmitPilot = viewModel::submitPilotAuth
-                )
+                if (authState.isRestoringSession) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            CircularProgressIndicator(color = ForestGreen)
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "Restoring your NexusTekFusion pilot session...",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                } else {
+                    AuthScreen(
+                        state = authState,
+                        onToggleSignUp = viewModel::toggleAuthMode,
+                        onUpdateLoginEmail = viewModel::updateLoginEmail,
+                        onUpdateOtpInput = viewModel::updateOtpInput,
+                        onRequestOtp = { viewModel.requestPilotLoginOtp() },
+                        onVerifyOtp = { viewModel.verifyPilotLoginOtp() },
+                        onChangeLoginEmail = viewModel::changeLoginEmail,
+                        onSubmitPilot = viewModel::submitPilotAuth
+                    )
+                }
             } else {
                 when (UserRole.fromApi(user.role)) {
                     UserRole.ADMIN -> AdminDashboardScreen(
@@ -163,6 +206,8 @@ fun KrishivantriPilotApp(
                     UserRole.PILOT, UserRole.FARMER -> PilotDashboardScreen(
                         user = user,
                         profile = pilotProfile,
+                        bankAccount = pilotBankAccount,
+                        withdrawals = pilotWithdrawals,
                         mapRepository = viewModel.mapRepository,
                         mapState = mapState,
                         queueOrders = pilotQueueOrders,
@@ -185,7 +230,9 @@ fun KrishivantriPilotApp(
                         onStartSpraying = viewModel::startSpraying,
                         onCompleteOrder = viewModel::completeOrder,
                         onOpenWalletTopUp = viewModel::openWalletTopUp,
+                        onOpenWithdrawSheet = viewModel::openWithdrawSheet,
                         onUpdateAccountDetails = viewModel::updatePilotAccountDetails,
+                        onSaveBankAccount = viewModel::savePilotBankAccount,
                         onSignOut = viewModel::signOut,
                         onSilentSync = viewModel::syncPilotSilently
                     )
@@ -207,6 +254,30 @@ fun KrishivantriPilotApp(
             alert = alert,
             onTopUpNow = { recommendedAmount -> viewModel.openWalletTopUp(recommendedAmount) },
             onDismiss = viewModel::dismissInsufficientWalletAlert
+        )
+    }
+
+    if (withdrawSheetState.isVisible) {
+        val onlineEarnings = pilotAssignedOrders
+            .filter {
+                it.statusEnum == OrderStatus.COMPLETED &&
+                    it.paymentMethodEnum == PaymentMethod.ONLINE
+            }
+            .sumOf { it.order.pilotEarnings }
+        val totalWithdrawn = pilotWithdrawals
+            .filter { it.status != WithdrawalStatus.FAILED.apiValue }
+            .sumOf { it.amount }
+        val availableToWithdraw = ((onlineEarnings - totalWithdrawn) * 100.0).roundToInt() / 100.0
+
+        PilotWithdrawBottomSheet(
+            user = currentUser,
+            profile = pilotProfile,
+            bankAccount = pilotBankAccount,
+            availableBalance = availableToWithdraw.coerceAtLeast(0.0),
+            sheetState = withdrawSheetState,
+            onClearError = viewModel::clearWithdrawError,
+            onSubmitWithdrawal = viewModel::submitPilotWithdrawal,
+            onDismiss = viewModel::dismissWithdrawSheet
         )
     }
 }

@@ -25,9 +25,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Logout
+import androidx.compose.material.icons.rounded.AccountBalance
 import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Email
+import androidx.compose.material.icons.rounded.Numbers
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Phone
 import androidx.compose.material.icons.rounded.Save
@@ -53,10 +56,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.model.DroneType
+import com.example.data.model.PilotBankAccountEntity
 import com.example.data.model.PilotProfileEntity
 import com.example.data.model.UserEntity
 import com.example.ui.theme.AlertRust
@@ -74,12 +79,19 @@ import java.util.Locale
 fun PilotAccountDetailsTab(
     user: UserEntity,
     profile: PilotProfileEntity?,
+    bankAccount: PilotBankAccountEntity?,
     onSaveAccountDetails: (
         name: String,
         droneType: DroneType,
         tankCapacityText: String,
         bankUpiId: String,
         licenseUri: String?
+    ) -> Unit,
+    onSaveBankAccount: (
+        accountHolderName: String,
+        accountNumber: String,
+        ifscCode: String,
+        bankName: String
     ) -> Unit,
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier
@@ -98,6 +110,23 @@ fun PilotAccountDetailsTab(
     }
     var licenseUri by rememberSaveable(user.id) { mutableStateOf(profile?.licenseDocumentUri.orEmpty()) }
     var validationError by rememberSaveable { mutableStateOf<String?>(null) }
+
+    var holderName by rememberSaveable(user.id) {
+        mutableStateOf(bankAccount?.accountHolderName?.takeIf { it.isNotBlank() } ?: user.name)
+    }
+    var accountNumber by rememberSaveable(user.id) { mutableStateOf(bankAccount?.accountNumber.orEmpty()) }
+    var ifscCode by rememberSaveable(user.id) { mutableStateOf(bankAccount?.ifscCode.orEmpty()) }
+    var bankName by rememberSaveable(user.id) { mutableStateOf(bankAccount?.bankName.orEmpty()) }
+    var bankValidationError by rememberSaveable { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(bankAccount) {
+        if (bankAccount != null) {
+            holderName = bankAccount.accountHolderName
+            accountNumber = bankAccount.accountNumber
+            ifscCode = bankAccount.ifscCode
+            bankName = bankAccount.bankName
+        }
+    }
 
     LaunchedEffect(user.name, profile?.bankUpiId, profile?.droneType, profile?.tankCapacity, profile?.licenseDocumentUri) {
         name = user.name
@@ -210,6 +239,19 @@ fun PilotAccountDetailsTab(
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("pilot_account_name_input")
+                    )
+
+                    OutlinedTextField(
+                        value = user.email.ifBlank { "Not registered" },
+                        onValueChange = {},
+                        enabled = false,
+                        label = { Text("Registered Email Address") },
+                        leadingIcon = { Icon(Icons.Rounded.Email, contentDescription = null) },
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("pilot_account_email_text")
                     )
 
                     OutlinedTextField(
@@ -392,6 +434,145 @@ fun PilotAccountDetailsTab(
                 }
             }
 
+            // Bank Account Details Card for Direct Earnings Withdrawal
+            Surface(
+                shape = RoundedCornerShape(22.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Bank Account for Withdrawals",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = ForestGreen
+                    )
+                    Text(
+                        text = "Saved bank details are used when you withdraw mission earnings from the Earnings tab.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    OutlinedTextField(
+                        value = holderName,
+                        onValueChange = {
+                            holderName = it
+                            bankValidationError = null
+                        },
+                        label = { Text("Account Holder Name") },
+                        leadingIcon = { Icon(Icons.Rounded.Person, contentDescription = null) },
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("pilot_account_bank_holder_input")
+                    )
+
+                    OutlinedTextField(
+                        value = accountNumber,
+                        onValueChange = { input ->
+                            accountNumber = input.filter(Char::isDigit).take(18)
+                            bankValidationError = null
+                        },
+                        label = { Text("Bank Account Number") },
+                        leadingIcon = { Icon(Icons.Rounded.Numbers, contentDescription = null) },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("pilot_account_bank_number_input")
+                    )
+
+                    OutlinedTextField(
+                        value = ifscCode,
+                        onValueChange = { input ->
+                            ifscCode = input.uppercase(Locale.US).filter { it.isLetterOrDigit() }.take(11)
+                            bankValidationError = null
+                        },
+                        label = { Text("IFSC Code") },
+                        placeholder = { Text("e.g. HDFC0001234") },
+                        leadingIcon = { Icon(Icons.Rounded.AccountBalance, contentDescription = null) },
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("pilot_account_bank_ifsc_input")
+                    )
+
+                    OutlinedTextField(
+                        value = bankName,
+                        onValueChange = {
+                            bankName = it
+                            bankValidationError = null
+                        },
+                        label = { Text("Bank Name (Optional)") },
+                        placeholder = { Text("e.g. State Bank of India") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("pilot_account_bank_name_input")
+                    )
+
+                    val bankErr = bankValidationError
+                    if (!bankErr.isNullOrBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = AlertRustBg,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = bankErr,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = AlertRust,
+                                modifier = Modifier.padding(12.dp)
+                            )
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            val cleanHolder = holderName.trim()
+                            val cleanAcct = accountNumber.trim()
+                            val cleanIfsc = ifscCode.trim().uppercase(Locale.US)
+                            when {
+                                cleanHolder.isBlank() ->
+                                    bankValidationError = "Enter account holder name."
+                                cleanAcct.length !in 9..18 ->
+                                    bankValidationError = "Enter a valid 9 to 18-digit bank account number."
+                                !Regex("^[A-Z]{4}0[A-Z0-9]{6}$").matches(cleanIfsc) ->
+                                    bankValidationError = "Enter a valid 11-character IFSC code (e.g. HDFC0001234)."
+                                else -> {
+                                    bankValidationError = null
+                                    onSaveBankAccount(cleanHolder, cleanAcct, cleanIfsc, bankName.trim())
+                                }
+                            }
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, ForestGreen),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(50.dp)
+                            .testTag("pilot_save_bank_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.AccountBalance,
+                            contentDescription = null,
+                            tint = ForestGreen,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Save Bank Payout Account", color = ForestGreen, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+
             OutlinedButton(
                 onClick = onSignOut,
                 shape = RoundedCornerShape(14.dp),
@@ -408,7 +589,7 @@ fun PilotAccountDetailsTab(
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(Modifier.width(8.dp))
-                Text("Sign Out", color = AlertRust, fontWeight = FontWeight.SemiBold)
+                Text("Log Out", color = AlertRust, fontWeight = FontWeight.SemiBold)
             }
         }
     }

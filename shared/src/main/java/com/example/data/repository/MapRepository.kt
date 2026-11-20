@@ -375,6 +375,7 @@ class MapRepository(
                             object : WebSocketListener() {
                                 override fun onOpen(webSocket: WebSocket, response: Response) {
                                     backoffMs = 3_000L
+                                    SupabaseClient.markRealtimeState(true)
                                     val joinPayload = buildRealtimeJoinPayload(
                                         topic = "realtime:public:operator_locations",
                                         table = "operator_locations"
@@ -426,11 +427,13 @@ class MapRepository(
 
                                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                                     heartbeatJob?.cancel()
+                                    SupabaseClient.markRealtimeState(false)
                                     connectionClosed.complete(Unit)
                                 }
 
                                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                                     heartbeatJob?.cancel()
+                                    SupabaseClient.markRealtimeState(false)
                                     connectionClosed.complete(Unit)
                                 }
                             }
@@ -473,6 +476,7 @@ class MapRepository(
                         object : WebSocketListener() {
                             override fun onOpen(webSocket: WebSocket, response: Response) {
                                 backoffMs = 3_000L
+                                SupabaseClient.markRealtimeState(true)
                                 val joinPayload = buildRealtimeJoinPayload(
                                     topic = "realtime:public:orders",
                                     table = "orders"
@@ -507,11 +511,13 @@ class MapRepository(
 
                             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                                 heartbeatJob?.cancel()
+                                SupabaseClient.markRealtimeState(false)
                                 connectionClosed.complete(Unit)
                             }
 
                             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                                 heartbeatJob?.cancel()
+                                SupabaseClient.markRealtimeState(false)
                                 connectionClosed.complete(Unit)
                             }
                         }

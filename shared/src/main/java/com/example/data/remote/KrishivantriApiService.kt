@@ -16,6 +16,7 @@ import retrofit2.http.Path
 @JsonClass(generateAdapter = true)
 data class PilotRegisterRequest(
     val name: String,
+    val email: String,
     val phone: String,
     val drone_type: String,
     val tank_capacity: Double,
@@ -38,9 +39,31 @@ data class LoginRequest(
 )
 
 @JsonClass(generateAdapter = true)
+data class EmailOtpRequest(
+    val email: String,
+    val role: String = "pilot"
+)
+
+@JsonClass(generateAdapter = true)
+data class EmailOtpVerifyRequest(
+    val email: String,
+    val otp: String,
+    val role: String = "pilot"
+)
+
+@JsonClass(generateAdapter = true)
+data class EmailOtpResponse(
+    val success: Boolean,
+    val message: String,
+    val cooldown_seconds: Int = 60,
+    val expires_in_seconds: Int = 300
+)
+
+@JsonClass(generateAdapter = true)
 data class AuthResponse(
     val user_id: String,
     val name: String,
+    val email: String = "",
     val phone: String,
     val role: String,
     val token: String
@@ -90,6 +113,18 @@ interface KrishivantriApiService {
 
     @POST("auth/login/")
     suspend fun login(@Body request: LoginRequest): AuthResponse
+
+    @POST("auth/otp/request/")
+    suspend fun requestEmailOtp(@Body request: EmailOtpRequest): EmailOtpResponse
+
+    @POST("auth/otp/verify/")
+    suspend fun verifyEmailOtp(@Body request: EmailOtpVerifyRequest): AuthResponse
+
+    @GET("auth/session/")
+    suspend fun validateSession(): AuthResponse
+
+    @POST("auth/logout/")
+    suspend fun logout(): ApiStatusResponse
 
     @POST("farmer/orders/")
     suspend fun createOrder(@Body request: CreateOrderRequest): OrderResponseDto

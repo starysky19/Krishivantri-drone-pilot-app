@@ -6,10 +6,17 @@ from django.utils import timezone
 
 
 class CustomUserManager(BaseUserManager):
-    def create_user(self, phone, name, role="farmer", password=None, **extra_fields):
+    def create_user(self, phone, name, role="farmer", email=None, password=None, **extra_fields):
         if not phone:
             raise ValueError("Phone number is required.")
-        user = self.model(phone=phone.strip(), name=name.strip(), role=role, **extra_fields)
+        normalized_email = email.strip().lower() if email and email.strip() else None
+        user = self.model(
+            phone=phone.strip(),
+            email=normalized_email,
+            name=name.strip(),
+            role=role,
+            **extra_fields,
+        )
         if password:
             user.set_password(password)
         else:
@@ -32,6 +39,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     phone = models.CharField(max_length=20, unique=True)
+    email = models.EmailField(max_length=254, unique=True, null=True, blank=True)
     name = models.CharField(max_length=150)
     role = models.CharField(max_length=16, choices=ROLE_CHOICES, default="farmer")
     is_active = models.BooleanField(default=True)
@@ -134,3 +142,21 @@ class CommissionLog(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+
+
+class EmailOTP(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    email = models.EmailField(max_length=254, db_index=True)
+    otp_hash = models.CharField(max_length=128)
+    salt = models.CharField(max_length=64)
+    expires_at = models.DateTimeField(db_index=True)
+    attempt_count = models.PositiveSmallIntegerField(default=0)
+    max_attempts = models.PositiveSmallIntegerField(default=5)
+    is_used = models.BooleanField(default=False)
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"EmailOTP({self.email}, used={self.is_used})"

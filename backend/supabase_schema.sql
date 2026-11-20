@@ -7,10 +7,16 @@ create extension if not exists "uuid-ossp";
 create table if not exists public.users (
     id text primary key,
     phone text unique not null,
+    email text,
     name text not null,
     role text not null check (role in ('admin', 'pilot', 'farmer')),
     created_at bigint not null default (extract(epoch from now()) * 1000)::bigint
 );
+
+alter table public.users add column if not exists email text;
+create unique index if not exists idx_users_email_unique
+    on public.users (lower(email))
+    where email is not null and email <> '';
 
 create table if not exists public.farmer_profiles (
     user_id text primary key references public.users(id) on delete cascade,
@@ -87,6 +93,23 @@ create table if not exists public.operator_locations (
     updated_at timestamptz not null default now()
 );
 
+create table if not exists public.pilot_withdrawals (
+    id text primary key,
+    pilot_id text not null references public.users(id) on delete cascade,
+    amount double precision not null check (amount > 0),
+    method text not null check (method in ('bank_transfer', 'upi')),
+    account_holder_name text not null default '',
+    bank_account_last4 text not null default '',
+    ifsc_code text not null default '',
+    bank_name text not null default '',
+    upi_id text not null default '',
+    reference_id text not null default '',
+    status text not null check (status in ('processing', 'completed', 'failed')) default 'completed',
+    created_at bigint not null default (extract(epoch from now()) * 1000)::bigint
+);
+
+create index if not exists idx_pilot_withdrawals_pilot on public.pilot_withdrawals(pilot_id);
+
 -- Enable Row Level Security
 alter table public.users enable row level security;
 alter table public.farmer_profiles enable row level security;
@@ -94,6 +117,7 @@ alter table public.pilot_profiles enable row level security;
 alter table public.orders enable row level security;
 alter table public.farm_boundaries enable row level security;
 alter table public.operator_locations enable row level security;
+alter table public.pilot_withdrawals enable row level security;
 
 drop policy if exists "Allow app user read/write" on public.users;
 create policy "Allow app user read/write" on public.users for all using (true) with check (true);
@@ -116,6 +140,12 @@ create policy "Allow authenticated or anon farm boundary read/write"
 drop policy if exists "Allow realtime operator location read/write" on public.operator_locations;
 create policy "Allow realtime operator location read/write"
     on public.operator_locations for all
+    using (true)
+    with check (true);
+
+drop policy if exists "Allow pilot withdrawal read/write" on public.pilot_withdrawals;
+create policy "Allow pilot withdrawal read/write"
+    on public.pilot_withdrawals for all
     using (true)
     with check (true);
 

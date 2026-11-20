@@ -21,6 +21,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.CloudDone
+import androidx.compose.material.icons.rounded.CloudOff
+import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.Eco
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.WarningAmber
@@ -53,10 +56,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.model.LatLngPoint
+import com.example.data.remote.CloudConnectionState
+import com.example.data.remote.CloudStatusSnapshot
 import com.example.ui.theme.AlertRust
 import com.example.ui.theme.AlertRustBg
 import com.example.ui.theme.EmeraldPulse
 import com.example.ui.theme.ForestGreen
+import com.example.ui.theme.HarvestAmber
+import com.example.ui.theme.HarvestGoldBg
 import com.example.ui.theme.MintHighlight
 import com.example.ui.theme.SoftSage
 import com.example.ui.viewmodel.InsufficientWalletAlert
@@ -109,6 +116,53 @@ fun KrishivantriBrandMark(
                 text = subtitle,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+fun CloudStatusBadge(
+    cloudStatus: CloudStatusSnapshot,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val (bg, fg, icon) = when (cloudStatus.state) {
+        CloudConnectionState.CONNECTED -> Triple(SoftSage, ForestGreen, Icons.Rounded.CloudDone)
+        CloudConnectionState.CONNECTING,
+        CloudConnectionState.RECONNECTING -> Triple(HarvestGoldBg, HarvestAmber, Icons.Rounded.CloudSync)
+        CloudConnectionState.OFFLINE,
+        CloudConnectionState.NOT_CONFIGURED -> Triple(AlertRustBg, AlertRust, Icons.Rounded.CloudOff)
+    }
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = bg,
+        border = BorderStroke(1.dp, fg.copy(alpha = 0.25f)),
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onRetry)
+            .testTag("cloud_status_badge")
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = cloudStatus.detailMessage,
+                tint = fg,
+                modifier = Modifier.size(16.dp)
+            )
+            Text(
+                text = cloudStatus.detailMessage,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = fg,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
             )
         }
     }

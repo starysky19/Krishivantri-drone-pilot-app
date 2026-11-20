@@ -4,14 +4,11 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,12 +30,15 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Email
 import androidx.compose.material.icons.rounded.FlightTakeoff
+import androidx.compose.material.icons.rounded.LockClock
+import androidx.compose.material.icons.rounded.MarkEmailRead
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Phone
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.material.icons.rounded.WaterDrop
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -52,7 +52,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -65,7 +64,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.model.DroneType
@@ -76,18 +74,27 @@ import com.example.ui.theme.AlertRustBg
 import com.example.ui.theme.EmeraldPulse
 import com.example.ui.theme.ForestGreen
 import com.example.ui.theme.SoftSage
+import com.example.ui.theme.VerifiedTeal
+import com.example.ui.theme.VerifiedTealBg
 import com.example.ui.viewmodel.AuthUiState
+import java.util.Locale
 
 /**
- * Dedicated Drone Pilot Login / Registration screen for the standalone
- * "Krishivantri Drone Pilot" app.
+ * Dedicated Drone Pilot Registration & Email OTP Authentication screen for the
+ * NexusTekFusion Krishivantri Drone Pilot app.
  */
 @Composable
 fun AuthScreen(
     state: AuthUiState,
     onToggleSignUp: (Boolean) -> Unit,
+    onUpdateLoginEmail: (String) -> Unit,
+    onUpdateOtpInput: (String) -> Unit,
+    onRequestOtp: () -> Unit,
+    onVerifyOtp: () -> Unit,
+    onChangeLoginEmail: () -> Unit,
     onSubmitPilot: (
         name: String,
+        email: String,
         phone: String,
         droneType: DroneType,
         tankCapacityText: String,
@@ -97,6 +104,7 @@ fun AuthScreen(
     modifier: Modifier = Modifier
 ) {
     var name by rememberSaveable { mutableStateOf("") }
+    var regEmail by rememberSaveable { mutableStateOf("") }
     var phone by rememberSaveable { mutableStateOf("") }
     var selectedDroneType by rememberSaveable { mutableStateOf(DroneType.QUADCOPTER) }
     var tankCapacityText by rememberSaveable { mutableStateOf("10") }
@@ -129,7 +137,7 @@ fun AuthScreen(
         ) {
             KrishivantriBrandMark(
                 title = "Krishivantri Drone Pilot",
-                subtitle = "Partner Operator Dispatch & Telemetry"
+                subtitle = "NexusTekFusion • Partner Dispatch & Telemetry"
             )
 
             Surface(
@@ -173,7 +181,7 @@ fun AuthScreen(
                                 modifier = Modifier.size(18.dp)
                             )
                             Text(
-                                text = "PILOT PARTNER EDITION",
+                                text = "NEXUSTEKFUSION PILOT PARTNER",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = SoftSage
@@ -229,11 +237,11 @@ fun AuthScreen(
                         )
                     }
 
-                    AnimatedVisibility(visible = state.isSignUpMode) {
+                    if (state.isSignUpMode) {
                         OutlinedTextField(
                             value = name,
                             onValueChange = { name = it },
-                            label = { Text("Pilot Full Name") },
+                            label = { Text("Pilot Full Name *") },
                             leadingIcon = { Icon(Icons.Rounded.Person, contentDescription = null) },
                             singleLine = true,
                             shape = RoundedCornerShape(14.dp),
@@ -241,24 +249,36 @@ fun AuthScreen(
                                 .fillMaxWidth()
                                 .testTag("pilot_auth_name_input")
                         )
-                    }
 
-                    OutlinedTextField(
-                        value = phone,
-                        onValueChange = { input ->
-                            phone = input.filter(Char::isDigit).take(15)
-                        },
-                        label = { Text("Pilot Mobile Number") },
-                        leadingIcon = { Icon(Icons.Rounded.Phone, contentDescription = null) },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                        singleLine = true,
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("pilot_auth_phone_input")
-                    )
+                        OutlinedTextField(
+                            value = regEmail,
+                            onValueChange = { regEmail = it.trim() },
+                            label = { Text("Email Address *") },
+                            placeholder = { Text("pilot@nexustekfusion.com") },
+                            leadingIcon = { Icon(Icons.Rounded.Email, contentDescription = null) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                            singleLine = true,
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("pilot_auth_reg_email_input")
+                        )
 
-                    AnimatedVisibility(visible = state.isSignUpMode) {
+                        OutlinedTextField(
+                            value = phone,
+                            onValueChange = { input ->
+                                phone = input.filter(Char::isDigit).take(15)
+                            },
+                            label = { Text("Pilot Mobile Number *") },
+                            leadingIcon = { Icon(Icons.Rounded.Phone, contentDescription = null) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                            singleLine = true,
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("pilot_auth_phone_input")
+                        )
+
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             Text(
                                 text = "Drone Platform",
@@ -362,57 +382,231 @@ fun AuthScreen(
                                 )
                             }
                         }
-                    }
 
-                    val errorMsg = state.errorMessage
-                    if (!errorMsg.isNullOrBlank()) {
+                        AuthErrorBanner(state.errorMessage)
+
+                        Button(
+                            onClick = {
+                                onSubmitPilot(
+                                    name,
+                                    regEmail,
+                                    phone,
+                                    selectedDroneType,
+                                    tankCapacityText,
+                                    licenseUri,
+                                    bankUpiId
+                                )
+                            },
+                            enabled = !state.isLoading,
+                            shape = RoundedCornerShape(16.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = ForestGreen),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(54.dp)
+                                .testTag("pilot_auth_submit_button")
+                        ) {
+                            if (state.isLoading) {
+                                CircularProgressIndicator(
+                                    color = Color.White,
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Text(
+                                    text = "Register Pilot & Start Dispatch",
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                            }
+                        }
+                    } else if (!state.isOtpStep) {
+                        // Existing Pilot Login — Step 1: Enter Email Address & Get OTP
+                        Text(
+                            text = "Sign in securely with a one-time verification code sent to your registered email address.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        OutlinedTextField(
+                            value = state.emailInput,
+                            onValueChange = onUpdateLoginEmail,
+                            label = { Text("Registered Email Address") },
+                            placeholder = { Text("pilot@nexustekfusion.com") },
+                            leadingIcon = { Icon(Icons.Rounded.Email, contentDescription = null) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                            singleLine = true,
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("pilot_auth_login_email_input")
+                        )
+
+                        AuthErrorBanner(state.errorMessage)
+
+                        Button(
+                            onClick = onRequestOtp,
+                            enabled = !state.isLoading && state.resendCooldownSeconds == 0,
+                            shape = RoundedCornerShape(16.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = ForestGreen),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(54.dp)
+                                .testTag("pilot_auth_get_otp_button")
+                        ) {
+                            if (state.isLoading) {
+                                CircularProgressIndicator(
+                                    color = Color.White,
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Text(
+                                    text = if (state.resendCooldownSeconds > 0) {
+                                        "Wait ${state.resendCooldownSeconds}s for Get OTP"
+                                    } else {
+                                        "Get OTP"
+                                    },
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                            }
+                        }
+                    } else {
+                        // Existing Pilot Login — Step 2: Verify Email OTP
                         Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = AlertRustBg,
+                            shape = RoundedCornerShape(14.dp),
+                            color = VerifiedTealBg,
+                            border = BorderStroke(1.dp, VerifiedTeal.copy(alpha = 0.4f)),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text(
-                                text = errorMsg,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = AlertRust,
-                                modifier = Modifier.padding(12.dp)
-                            )
+                            Column(
+                                modifier = Modifier.padding(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.MarkEmailRead,
+                                        contentDescription = null,
+                                        tint = VerifiedTeal,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = state.emailInput,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ForestGreen,
+                                        modifier = Modifier.weight(1f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    TextButton(
+                                        onClick = onChangeLoginEmail,
+                                        modifier = Modifier.testTag("pilot_auth_change_email_button")
+                                    ) {
+                                        Text("Change", color = VerifiedTeal, fontWeight = FontWeight.SemiBold)
+                                    }
+                                }
+                                Text(
+                                    text = state.otpNoticeMessage
+                                        ?: "Enter the 6-digit OTP sent from NexusTekFusion.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = ForestGreen
+                                )
+                                val expiryMins = state.otpExpiresRemainingSeconds / 60
+                                val expirySecs = state.otpExpiresRemainingSeconds % 60
+                                val expiryFormatted = String.format(Locale.US, "%d:%02d", expiryMins, expirySecs)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.LockClock,
+                                        contentDescription = null,
+                                        tint = if (state.otpExpiresRemainingSeconds > 0) VerifiedTeal else AlertRust,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Text(
+                                        text = if (state.otpExpiresRemainingSeconds > 0) {
+                                            "OTP expires in $expiryFormatted"
+                                        } else {
+                                            "OTP expired — tap Resend OTP"
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (state.otpExpiresRemainingSeconds > 0) VerifiedTeal else AlertRust
+                                    )
+                                }
+                            }
                         }
-                    }
 
-                    Button(
-                        onClick = {
-                            onSubmitPilot(
-                                name,
-                                phone,
-                                selectedDroneType,
-                                tankCapacityText,
-                                licenseUri,
-                                bankUpiId
+                        OutlinedTextField(
+                            value = state.otpInput,
+                            onValueChange = onUpdateOtpInput,
+                            label = { Text("Enter Email OTP") },
+                            placeholder = { Text("6-digit verification code") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("pilot_auth_otp_input")
+                        )
+
+                        AuthErrorBanner(state.errorMessage)
+
+                        Button(
+                            onClick = onVerifyOtp,
+                            enabled = !state.isLoading &&
+                                state.otpInput.length >= 6 &&
+                                state.otpExpiresRemainingSeconds > 0 &&
+                                state.failedOtpAttempts < state.maxOtpAttempts,
+                            shape = RoundedCornerShape(16.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = ForestGreen),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(54.dp)
+                                .testTag("pilot_auth_verify_otp_button")
+                        ) {
+                            if (state.isLoading) {
+                                CircularProgressIndicator(
+                                    color = Color.White,
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Text(
+                                    text = "Verify OTP & Log In",
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = onRequestOtp,
+                            enabled = !state.isLoading && state.resendCooldownSeconds == 0,
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("pilot_auth_resend_otp_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = null,
+                                tint = ForestGreen,
+                                modifier = Modifier.size(18.dp)
                             )
-                        },
-                        enabled = !state.isLoading,
-                        shape = RoundedCornerShape(16.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = ForestGreen),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(54.dp)
-                            .testTag("pilot_auth_submit_button")
-                    ) {
-                        if (state.isLoading) {
-                            CircularProgressIndicator(
-                                color = Color.White,
-                                modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.dp
-                            )
-                        } else {
+                            Spacer(Modifier.width(8.dp))
                             Text(
-                                text = if (state.isSignUpMode) {
-                                    "Register Pilot & Start Dispatch"
+                                text = if (state.resendCooldownSeconds > 0) {
+                                    "Resend OTP in ${state.resendCooldownSeconds}s"
                                 } else {
-                                    "Sign In to Pilot Console"
+                                    "Resend OTP"
                                 },
-                                style = MaterialTheme.typography.labelLarge
+                                color = ForestGreen,
+                                fontWeight = FontWeight.SemiBold
                             )
                         }
                     }
@@ -432,11 +626,31 @@ fun AuthScreen(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "Krishivantri Drone Pilot • Precision Aerial Operations",
+                    text = "NexusTekFusion • Krishivantri Drone Pilot Operations",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun AuthErrorBanner(errorMsg: String?) {
+    if (!errorMsg.isNullOrBlank()) {
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = AlertRustBg,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("pilot_auth_error_banner")
+        ) {
+            Text(
+                text = errorMsg,
+                style = MaterialTheme.typography.bodySmall,
+                color = AlertRust,
+                modifier = Modifier.padding(12.dp)
+            )
         }
     }
 }

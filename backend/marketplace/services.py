@@ -1,16 +1,218 @@
+import hashlib
+import hmac
 import math
+import secrets
+from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 import razorpay
 from django.conf import settings
-from django.db import transaction
+from django.core.mail import EmailMultiAlternatives, get_connection
+from django.core.validators import validate_email
+from django.core.exceptions import ValidationError
+from django.db import connection, transaction
 from django.db.models import F
+from django.utils import timezone
+from rest_framework.authtoken.models import Token
 
-from .models import CommissionLog, Order, PilotProfile
+from .models import CommissionLog, CustomUser, EmailOTP, Order, PilotProfile
+
+OTP_EXPIRY_SECONDS = 300
+OTP_COOLDOWN_SECONDS = 60
+OTP_MAX_REQUESTS_PER_15M = 5
+OTP_MAX_VERIFY_ATTEMPTS = 5
 
 TARIFF_PER_ACRE = Decimal("450.00")
 COMMISSION_RATE = Decimal("0.10")
 EARTH_RADIUS_METERS = 6371000.0
 SQ_METERS_PER_ACRE = 4046.8564224
+
+
+def normalize_email(raw_email: str) -> str:
+    return (raw_email or "").strip().lower()
+
+
+def is_valid_email_format(email: str) -> bool:
+    try:
+        validate_email(email)
+        return True
+    except ValidationError:
+        return False
+
+
+def generate_secure_otp(length: int = 6) -> str:
+    upper = 10 ** length
+    return f"{secrets.randbelow(upper):0{length}d}"
+
+
+def hash_otp(email: str, otp: str, salt: str) -> str:
+    payload = f"{normalize_email(email)}:{otp.strip()}:{salt}".encode("utf-8")
+    digest = hashlib.pbkdf2_hmac("sha256", payload, settings.SECRET_KEY.encode("utf-8"), 120_000)
+    return digest.hex()
+
+
+def load_existing_smtp_config() -> dict:
+    """
+    Reuses existing SMTP settings stored in the database (if an existing SMTP config table is present)
+    or Django settings loaded from environment variables. Never exposes credentials to clients.
+    """
+    candidate_tables = ("smtp_settings", "email_config", "email_settings", "app_smtp_config")
+    try:
+        existing_tables = set(connection.introspection.table_names())
+        for table in candidate_tables:
+            if table in existing_tables:
+                with connection.cursor() as cursor:
+                    cursor.execute(f'SELECT * FROM "{table}" LIMIT 1')
+                    row = cursor.fetchone()
+                    if row and cursor.description:
+                        cols = [col[0].lower() for col in cursor.description]
+                        data = dict(zip(cols, row))
+                        host = data.get("smtp_host") or data.get("host") or ""
+                        user = data.get("host_email") or data.get("smtp_user") or data.get("email") or ""
+                        password = data.get("smtp_password") or data.get("email_password") or data.get("password") or ""
+                        if host and user:
+                            return {
+                                "host": host,
+                                "port": int(data.get("smtp_port") or data.get("port") or 587),
+                                "username": user,
+                                "password": password,
+                                "use_tls": bool(data.get("use_tls", True)),
+                                "use_ssl": bool(data.get("use_ssl", False)),
+                                "from_email": data.get("from_email") or user,
+                            }
+    except Exception:
+        pass
+
+    return {
+        "host": getattr(settings, "EMAIL_HOST", ""),
+        "port": int(getattr(settings, "EMAIL_PORT", 587)),
+        "username": getattr(settings, "EMAIL_HOST_USER", ""),
+        "password": getattr(settings, "EMAIL_HOST_PASSWORD", ""),
+        "use_tls": bool(getattr(settings, "EMAIL_USE_TLS", True)),
+        "use_ssl": bool(getattr(settings, "EMAIL_USE_SSL", False)),
+        "from_email": getattr(settings, "DEFAULT_FROM_EMAIL", "") or getattr(settings, "EMAIL_HOST_USER", ""),
+    }
+
+
+def send_otp_email(recipient_email: str, otp_code: str) -> None:
+    smtp_cfg = load_existing_smtp_config()
+    from_email = smtp_cfg.get("from_email") or smtp_cfg.get("username")
+    subject = "NexusTekFusion Pilot Verification Code"
+    text_body = (
+        f"Your NexusTekFusion Krishivantri Pilot one-time verification code is: {otp_code}\n\n"
+        f"This code expires in 5 minutes. If you did not request this login, please ignore this email."
+    )
+    html_body = (
+        f"<p>Your <strong>NexusTekFusion Krishivantri Pilot</strong> one-time verification code is:</p>"
+        f"<h2 style='letter-spacing:4px;color:#1B4332;'>{otp_code}</h2>"
+        f"<p>This code expires in 5 minutes. Never share this code with anyone.</p>"
+    )
+    connection_kwargs = {}
+    if smtp_cfg.get("host"):
+        connection_kwargs = {
+            "host": smtp_cfg["host"],
+            "port": smtp_cfg["port"],
+            "username": smtp_cfg["username"],
+            "password": smtp_cfg["password"],
+            "use_tls": smtp_cfg["use_tls"],
+            "use_ssl": smtp_cfg["use_ssl"],
+        }
+    with get_connection(fail_silently=False, **connection_kwargs) as mail_conn:
+        msg = EmailMultiAlternatives(
+            subject=subject,
+            body=text_body,
+            from_email=from_email,
+            to=[recipient_email],
+            connection=mail_conn,
+        )
+        msg.attach_alternative(html_body, "text/html")
+        msg.send(fail_silently=False)
+
+
+def issue_email_otp(raw_email: str) -> tuple[bool, int, str]:
+    email = normalize_email(raw_email)
+    if not is_valid_email_format(email):
+        return False, 400, "Enter a valid email address."
+
+    now = timezone.now()
+    latest = EmailOTP.objects.filter(email=email).first()
+    if latest and (now - latest.created_at).total_seconds() < OTP_COOLDOWN_SECONDS:
+        wait_s = max(1, int(OTP_COOLDOWN_SECONDS - (now - latest.created_at).total_seconds()))
+        return False, 429, f"Please wait {wait_s} seconds before requesting another OTP."
+
+    window_start = now - timedelta(minutes=15)
+    recent_count = EmailOTP.objects.filter(email=email, created_at__gte=window_start).count()
+    if recent_count >= OTP_MAX_REQUESTS_PER_15M:
+        return False, 429, "Too many OTP requests. Please try again later."
+
+    user = CustomUser.objects.filter(email__iexact=email, is_active=True).first()
+    if user is None:
+        # Non-enumerating response: enforce identical cooldown without sending an email
+        EmailOTP.objects.create(
+            email=email,
+            otp_hash="unregistered_noop",
+            salt=secrets.token_hex(8),
+            expires_at=now + timedelta(seconds=OTP_COOLDOWN_SECONDS),
+            is_used=True,
+        )
+        return True, 200, "If this email is registered with NexusTekFusion, an OTP has been sent."
+
+    otp_code = generate_secure_otp(6)
+    salt = secrets.token_hex(16)
+    otp_digest = hash_otp(email, otp_code, salt)
+    expires_at = now + timedelta(seconds=OTP_EXPIRY_SECONDS)
+
+    with transaction.atomic():
+        EmailOTP.objects.filter(email=email, is_used=False).update(is_used=True)
+        EmailOTP.objects.create(
+            email=email,
+            otp_hash=otp_digest,
+            salt=salt,
+            expires_at=expires_at,
+            max_attempts=OTP_MAX_VERIFY_ATTEMPTS,
+        )
+
+    send_otp_email(email, otp_code)
+    return True, 200, "If this email is registered with NexusTekFusion, an OTP has been sent."
+
+
+def verify_email_otp(raw_email: str, otp_code: str, expected_role: str = "pilot") -> tuple[bool, int, str, CustomUser | None, str | None]:
+    email = normalize_email(raw_email)
+    clean_otp = (otp_code or "").strip()
+    if not is_valid_email_format(email) or not clean_otp.isdigit():
+        return False, 400, "Invalid or expired OTP.", None, None
+
+    now = timezone.now()
+    with transaction.atomic():
+        record = EmailOTP.objects.select_for_update().filter(email=email, is_used=False).first()
+        if record is None:
+            return False, 401, "Invalid or expired OTP.", None, None
+        if record.expires_at <= now:
+            record.is_used = True
+            record.save(update_fields=["is_used"])
+            return False, 401, "Invalid or expired OTP.", None, None
+        if record.attempt_count >= record.max_attempts:
+            record.is_used = True
+            record.save(update_fields=["is_used"])
+            return False, 429, "Too many incorrect OTP attempts. Request a new OTP.", None, None
+
+        expected_digest = hash_otp(email, clean_otp, record.salt)
+        if not hmac.compare_digest(record.otp_hash, expected_digest):
+            record.attempt_count += 1
+            if record.attempt_count >= record.max_attempts:
+                record.is_used = True
+            record.save(update_fields=["attempt_count", "is_used"])
+            return False, 401, "Invalid or expired OTP.", None, None
+
+        user = CustomUser.objects.filter(email__iexact=email, is_active=True).first()
+        if user is None or (expected_role and user.role != expected_role):
+            record.is_used = True
+            record.save(update_fields=["is_used"])
+            return False, 401, "Invalid or expired OTP.", None, None
+
+        record.is_used = True
+        record.save(update_fields=["is_used"])
+        token, _ = Token.objects.get_or_create(user=user)
+        return True, 200, "Authenticated.", user, token.key
 
 
 def calculate_polygon_area_acres(coordinates: list[dict]) -> Decimal:
