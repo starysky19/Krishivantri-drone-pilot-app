@@ -13,8 +13,10 @@ import com.example.data.model.OrderWithDetails
 import com.example.data.remote.SupabaseClient
 import com.example.data.remote.SupabaseOperatorLocationDto
 import com.example.domain.GeoPolygonCalculator
-import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -349,103 +351,216 @@ class MapRepository(
                 return@callbackFlow
             }
 
-            // Initial PostgREST snapshot
-            launch(Dispatchers.IO) {
-                runCatching {
-                    val resp = SupabaseClient.api?.getOperatorLocations()
-                    if (resp?.isSuccessful == true) {
-                        resp.body()?.forEach { dto ->
-                            currentMap[dto.id] = dto.toMarker()
+            var activeWs: WebSocket? = null
+            val reconnectJob = launch(Dispatchers.IO) {
+                var backoffMs = 3_000L
+                while (isActive) {
+                    // Refresh PostgREST snapshot on every (re)connect so missed updates are recovered
+                    runCatching {
+                        val resp = SupabaseClient.api?.getOperatorLocations()
+                        if (resp?.isSuccessful == true) {
+                            resp.body()?.forEach { dto ->
+                                currentMap[dto.id] = dto.toMarker()
+                            }
+                            trySend(currentMap.toMap())
                         }
-                        trySend(currentMap.toMap())
                     }
+
+                    val connectionClosed = CompletableDeferred<Unit>()
+                    var heartbeatJob: Job? = null
+                    val ws = runCatching {
+                        val request = Request.Builder().url(SupabaseClient.realtimeWebSocketUrl()).build()
+                        SupabaseClient.okHttpClient.newWebSocket(
+                            request,
+                            object : WebSocketListener() {
+                                override fun onOpen(webSocket: WebSocket, response: Response) {
+                                    backoffMs = 3_000L
+                                    val joinPayload = buildRealtimeJoinPayload(
+                                        topic = "realtime:public:operator_locations",
+                                        table = "operator_locations"
+                                    )
+                                    webSocket.send(joinPayload)
+
+                                    heartbeatJob?.cancel()
+                                    heartbeatJob = launch(Dispatchers.IO) {
+                                        var refCounter = 2
+                                        while (isActive) {
+                                            delay(25_000L)
+                                            val hb = JSONObject().apply {
+                                                put("topic", "phoenix")
+                                                put("event", "heartbeat")
+                                                put("payload", JSONObject())
+                                                put("ref", (refCounter++).toString())
+                                            }
+                                            if (!webSocket.send(hb.toString())) break
+                                        }
+                                    }
+                                }
+
+                                override fun onMessage(webSocket: WebSocket, text: String) {
+                                    runCatching {
+                                        val root = JSONObject(text)
+                                        if (root.optString("event") == "postgres_changes") {
+                                            val data = root.optJSONObject("payload")?.optJSONObject("data")
+                                            val record = data?.optJSONObject("record") ?: return@runCatching
+                                            val id = record.optString("id")
+                                            if (id.isNotBlank()) {
+                                                val marker = OperatorLocationMarker(
+                                                    id = id,
+                                                    name = record.optString("name", "Drone Operator"),
+                                                    roleType = OperatorRoleType.fromApi(
+                                                        record.optString("role_type", "drone_operator")
+                                                    ),
+                                                    lat = record.optDouble("lat"),
+                                                    lng = record.optDouble("lng"),
+                                                    droneType = record.optString("drone_type", "quadcopter"),
+                                                    isAvailable = record.optBoolean("is_available", true),
+                                                    headingDegrees = record.optDouble("heading_degrees", 0.0).toFloat()
+                                                )
+                                                currentMap[id] = marker
+                                                trySend(currentMap.toMap())
+                                            }
+                                        }
+                                    }
+                                }
+
+                                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                                    heartbeatJob?.cancel()
+                                    connectionClosed.complete(Unit)
+                                }
+
+                                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                                    heartbeatJob?.cancel()
+                                    connectionClosed.complete(Unit)
+                                }
+                            }
+                        )
+                    }.getOrNull()
+
+                    activeWs = ws
+                    if (ws != null) {
+                        connectionClosed.await()
+                    }
+                    heartbeatJob?.cancel()
+                    if (!isActive) break
+                    delay(backoffMs)
+                    backoffMs = (backoffMs * 2).coerceAtMost(30_000L)
                 }
             }
 
-            var heartbeatJob: kotlinx.coroutines.Job? = null
-            val ws = runCatching {
-                val request = Request.Builder().url(SupabaseClient.realtimeWebSocketUrl()).build()
-                SupabaseClient.okHttpClient.newWebSocket(
-                    request,
-                    object : WebSocketListener() {
-                        override fun onOpen(webSocket: WebSocket, response: Response) {
-                            val joinPayload = JSONObject().apply {
-                                put("topic", "realtime:public:operator_locations")
-                                put("event", "phx_join")
-                                put(
-                                    "payload",
-                                    JSONObject().apply {
-                                        put(
-                                            "config",
-                                            JSONObject().apply {
-                                                put(
-                                                    "postgres_changes",
-                                                    org.json.JSONArray().put(
-                                                        JSONObject().apply {
-                                                            put("event", "*")
-                                                            put("schema", "public")
-                                                            put("table", "operator_locations")
-                                                        }
-                                                    )
-                                                )
-                                            }
-                                        )
-                                    }
-                                )
-                                put("ref", "1")
-                            }
-                            webSocket.send(joinPayload.toString())
-
-                            heartbeatJob = CoroutineScope(Dispatchers.IO).launch {
-                                var refCounter = 2
-                                while (isActive) {
-                                    delay(25_000L)
-                                    val hb = JSONObject().apply {
-                                        put("topic", "phoenix")
-                                        put("event", "heartbeat")
-                                        put("payload", JSONObject())
-                                        put("ref", (refCounter++).toString())
-                                    }
-                                    webSocket.send(hb.toString())
-                                }
-                            }
-                        }
-
-                        override fun onMessage(webSocket: WebSocket, text: String) {
-                            runCatching {
-                                val root = JSONObject(text)
-                                if (root.optString("event") == "postgres_changes") {
-                                    val data = root.optJSONObject("payload")?.optJSONObject("data")
-                                    val record = data?.optJSONObject("record") ?: return@runCatching
-                                    val id = record.optString("id")
-                                    if (id.isNotBlank()) {
-                                        val marker = OperatorLocationMarker(
-                                            id = id,
-                                            name = record.optString("name", "Drone Operator"),
-                                            roleType = OperatorRoleType.fromApi(
-                                                record.optString("role_type", "drone_operator")
-                                            ),
-                                            lat = record.optDouble("lat"),
-                                            lng = record.optDouble("lng"),
-                                            droneType = record.optString("drone_type", "quadcopter"),
-                                            isAvailable = record.optBoolean("is_available", true),
-                                            headingDegrees = record.optDouble("heading_degrees", 0.0).toFloat()
-                                        )
-                                        currentMap[id] = marker
-                                        trySend(currentMap.toMap())
-                                    }
-                                }
-                            }
-                        }
-                    }
-                )
-            }.getOrNull()
-
             awaitClose {
-                heartbeatJob?.cancel()
-                ws?.close(1000, "Map observer closed")
+                reconnectJob.cancel()
+                activeWs?.close(1000, "Map observer closed")
             }
         }
+
+    fun observeSupabaseOrderChanges(): Flow<Unit> = callbackFlow {
+        if (!SupabaseClient.isConfigured()) {
+            awaitClose { }
+            return@callbackFlow
+        }
+
+        var activeWs: WebSocket? = null
+        val reconnectJob = launch(Dispatchers.IO) {
+            var backoffMs = 3_000L
+            while (isActive) {
+                val connectionClosed = CompletableDeferred<Unit>()
+                var heartbeatJob: Job? = null
+                val ws = runCatching {
+                    val request = Request.Builder().url(SupabaseClient.realtimeWebSocketUrl()).build()
+                    SupabaseClient.okHttpClient.newWebSocket(
+                        request,
+                        object : WebSocketListener() {
+                            override fun onOpen(webSocket: WebSocket, response: Response) {
+                                backoffMs = 3_000L
+                                val joinPayload = buildRealtimeJoinPayload(
+                                    topic = "realtime:public:orders",
+                                    table = "orders"
+                                )
+                                webSocket.send(joinPayload)
+                                trySend(Unit)
+
+                                heartbeatJob?.cancel()
+                                heartbeatJob = launch(Dispatchers.IO) {
+                                    var refCounter = 2
+                                    while (isActive) {
+                                        delay(25_000L)
+                                        val hb = JSONObject().apply {
+                                            put("topic", "phoenix")
+                                            put("event", "heartbeat")
+                                            put("payload", JSONObject())
+                                            put("ref", (refCounter++).toString())
+                                        }
+                                        if (!webSocket.send(hb.toString())) break
+                                    }
+                                }
+                            }
+
+                            override fun onMessage(webSocket: WebSocket, text: String) {
+                                runCatching {
+                                    val root = JSONObject(text)
+                                    if (root.optString("event") == "postgres_changes") {
+                                        trySend(Unit)
+                                    }
+                                }
+                            }
+
+                            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                                heartbeatJob?.cancel()
+                                connectionClosed.complete(Unit)
+                            }
+
+                            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                                heartbeatJob?.cancel()
+                                connectionClosed.complete(Unit)
+                            }
+                        }
+                    )
+                }.getOrNull()
+
+                activeWs = ws
+                if (ws != null) {
+                    connectionClosed.await()
+                }
+                heartbeatJob?.cancel()
+                if (!isActive) break
+                delay(backoffMs)
+                backoffMs = (backoffMs * 2).coerceAtMost(30_000L)
+            }
+        }
+
+        awaitClose {
+            reconnectJob.cancel()
+            activeWs?.close(1000, "Order observer closed")
+        }
+    }
+
+    private fun buildRealtimeJoinPayload(topic: String, table: String): String =
+        JSONObject().apply {
+            put("topic", topic)
+            put("event", "phx_join")
+            put(
+                "payload",
+                JSONObject().apply {
+                    put(
+                        "config",
+                        JSONObject().apply {
+                            put(
+                                "postgres_changes",
+                                org.json.JSONArray().put(
+                                    JSONObject().apply {
+                                        put("event", "*")
+                                        put("schema", "public")
+                                        put("table", table)
+                                    }
+                                )
+                            )
+                        }
+                    )
+                }
+            )
+            put("ref", "1")
+        }.toString()
 
     private fun SupabaseOperatorLocationDto.toMarker(): OperatorLocationMarker =
         OperatorLocationMarker(

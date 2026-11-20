@@ -119,7 +119,12 @@ interface KrishivantriApiService {
 object KrishivantriNetworkClient {
     fun create(): KrishivantriApiService {
         val logging = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BASIC
+            redactHeader("Authorization")
+            level = if (KrishivantriRuntimeConfig.isDebugLogging) {
+                HttpLoggingInterceptor.Level.BASIC
+            } else {
+                HttpLoggingInterceptor.Level.NONE
+            }
         }
         val client = OkHttpClient.Builder()
             .addInterceptor(logging)

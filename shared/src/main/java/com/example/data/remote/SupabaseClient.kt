@@ -201,8 +201,11 @@ object SupabaseClient {
     @Volatile
     private var cachedApi: SupabasePostgrestApi? = null
 
+    private fun normalizedRootUrl(): String =
+        KrishivantriRuntimeConfig.normalizeSupabaseBaseUrl(KrishivantriRuntimeConfig.supabaseUrl)
+
     fun isConfigured(): Boolean {
-        val url = KrishivantriRuntimeConfig.supabaseUrl.trim()
+        val url = normalizedRootUrl()
         val key = KrishivantriRuntimeConfig.supabaseAnonKey.trim()
         return url.startsWith("https://") &&
             !url.contains("your-project") &&
@@ -211,18 +214,28 @@ object SupabaseClient {
     }
 
     fun realtimeWebSocketUrl(): String {
-        val base = KrishivantriRuntimeConfig.supabaseUrl.trim().trimEnd('/')
-        val wsBase = base.replace("https://", "wss://").replace("http://", "ws://")
+        val base = normalizedRootUrl()
+        require(base.startsWith("https://")) { "Supabase URL must use HTTPS." }
+        val wsBase = base.replaceFirst("https://", "wss://")
         return "$wsBase/realtime/v1/websocket?apikey=${KrishivantriRuntimeConfig.supabaseAnonKey.trim()}&vsn=1.0.0"
     }
 
     val okHttpClient: OkHttpClient by lazy {
         val logging = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BASIC
+            redactHeader("apikey")
+            redactHeader("Authorization")
+            level = if (KrishivantriRuntimeConfig.isDebugLogging) {
+                HttpLoggingInterceptor.Level.BASIC
+            } else {
+                HttpLoggingInterceptor.Level.NONE
+            }
         }
         OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .writeTimeout(20, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .pingInterval(25, TimeUnit.SECONDS)
             .addInterceptor { chain ->
                 val key = KrishivantriRuntimeConfig.supabaseAnonKey.trim()
                 val reqBuilder = chain.request().newBuilder()
@@ -242,7 +255,7 @@ object SupabaseClient {
     val api: SupabasePostgrestApi?
         get() {
             if (!isConfigured()) return null
-            val baseUrl = KrishivantriRuntimeConfig.supabaseUrl.trim().trimEnd('/') + "/"
+            val baseUrl = normalizedRootUrl() + "/"
             val signature = "$baseUrl|${KrishivantriRuntimeConfig.supabaseAnonKey.trim()}"
             val existing = cachedApi
             if (existing != null && cachedSignature == signature) {

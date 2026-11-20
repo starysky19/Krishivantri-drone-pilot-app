@@ -26,14 +26,17 @@ import com.example.data.model.UserEntity
 import com.example.data.model.UserRole
 import com.example.data.repository.AcceptOrderResult
 import com.example.data.repository.AuthResult
+import com.example.data.repository.CloudSyncResult
 import com.example.data.repository.FarmRepository
 import com.example.data.repository.KrishivantriRepository
 import com.example.data.repository.LocationRepository
 import com.example.data.repository.MapRepository
 import com.example.domain.GeoPolygonCalculator
 import com.example.domain.LocationMatch
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -43,6 +46,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 data class RazorpaySheetState(
@@ -138,7 +142,7 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
 
     init {
         viewModelScope.launch {
-            runCatching { repository.ensureAdminSeeded() }
+            runCatching { repository.verifyLocalDatabaseReady() }
             refreshOfflineRegions()
         }
     }
@@ -269,7 +273,8 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
 
     fun submitFarmerAuth(name: String, phone: String, farmerId: String) {
         val isSignUp = _authState.value.isSignUpMode
-        if (phone.trim().length < 10) {
+        val digits = phone.trim().filter(Char::isDigit)
+        if (digits.length !in 10..15) {
             _authState.update { it.copy(errorMessage = "Enter a valid 10-digit mobile number.") }
             return
         }
@@ -281,9 +286,9 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
         viewModelScope.launch {
             _authState.update { it.copy(isLoading = true, errorMessage = null) }
             val result = if (isSignUp) {
-                repository.registerFarmer(name, phone, farmerId)
+                repository.registerFarmer(name, digits, farmerId)
             } else {
-                repository.loginByRole(phone, UserRole.FARMER)
+                repository.loginByRole(digits, UserRole.FARMER)
             }
             when (result) {
                 is AuthResult.Success -> {
@@ -309,15 +314,16 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
         bankUpiId: String
     ) {
         val isSignUp = _authState.value.isSignUpMode
-        if (phone.trim().length < 10) {
+        val digits = phone.trim().filter(Char::isDigit)
+        if (digits.length !in 10..15) {
             _authState.update { it.copy(errorMessage = "Enter a valid 10-digit contact number.") }
             return
         }
         if (isSignUp) {
             val tank = tankCapacityText.toDoubleOrNull()
-            if (name.isBlank() || tank == null || tank <= 0.0 || bankUpiId.isBlank()) {
+            if (name.isBlank() || tank == null || tank !in 1.0..200.0 || bankUpiId.isBlank()) {
                 _authState.update {
-                    it.copy(errorMessage = "Complete name, tank capacity, and UPI/Bank details.")
+                    it.copy(errorMessage = "Complete name, tank capacity (1–200L), and UPI/Bank details.")
                 }
                 return
             }
@@ -334,14 +340,14 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
             val result = if (isSignUp) {
                 repository.registerPilot(
                     name = name,
-                    phone = phone,
+                    phone = digits,
                     droneType = droneType,
                     tankCapacity = tankCapacityText.toDouble(),
                     licenseDocumentUri = licenseUri,
                     bankUpiId = bankUpiId
                 )
             } else {
-                repository.loginByRole(phone, UserRole.PILOT)
+                repository.loginByRole(digits, UserRole.PILOT)
             }
             when (result) {
                 is AuthResult.Success -> {
@@ -621,11 +627,8 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
                 polygonPoints = state.polygonPoints
             )
             _mapBookingState.update { it.copy(isSavingFarm = false, farmNameInput = "") }
-            _snackbarMessage.value = if (saved.isSyncedToSupabase) {
-                "Saved '${saved.farmName}' (${saved.areaAcres} ac / ${saved.areaHectares} ha) to Supabase."
-            } else {
-                "Saved '${saved.farmName}' locally (${saved.areaAcres} ac / ${saved.areaHectares} ha). Will sync when Supabase is connected."
-            }
+            _snackbarMessage.value =
+                "Saved '${saved.farmName}' (${saved.areaAcres} ac / ${saved.areaHectares} ha)."
         }
     }
 
@@ -758,18 +761,21 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
 
     fun onRazorpayKeyMissing() {
         _razorpaySheet.value = null
-        _snackbarMessage.value = "Configure RAZORPAY_KEY_ID in the AI Studio Secrets panel to open live Razorpay Checkout."
+        _snackbarMessage.value = "Online payment is temporarily unavailable. Please try again or choose Cash on Field."
     }
 
     private fun startFarmerSupabaseSync(farmerId: String) {
         farmerSupabaseSyncJob?.cancel()
         farmerSupabaseSyncJob = viewModelScope.launch {
-            while (true) {
-                runCatching {
+            while (isActive) {
+                try {
                     farmRepository.syncWithSupabase(farmerId)
                     repository.syncFarmerStateFromSupabase(farmerId)
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (_: Throwable) {
                 }
-                kotlinx.coroutines.delay(15_000L)
+                delay(15_000L)
             }
         }
     }
@@ -794,11 +800,36 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
     private fun startPilotSupabaseSync(pilotId: String) {
         pilotSupabaseSyncJob?.cancel()
         pilotSupabaseSyncJob = viewModelScope.launch {
-            while (true) {
-                runCatching {
-                    repository.syncPilotStateFromSupabase(pilotId)
+            launch {
+                mapRepository.observeSupabaseOrderChanges().collect {
+                    try {
+                        repository.syncPilotStateFromSupabase(pilotId)
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (_: Throwable) {
+                    }
                 }
-                kotlinx.coroutines.delay(10_000L)
+            }
+            while (isActive) {
+                try {
+                    repository.syncPilotStateFromSupabase(pilotId)
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (_: Throwable) {
+                }
+                delay(12_000L)
+            }
+        }
+    }
+
+    fun syncPilotSilently() {
+        val pilotId = _currentUser.value?.id ?: return
+        viewModelScope.launch {
+            try {
+                repository.syncPilotStateFromSupabase(pilotId)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Throwable) {
             }
         }
     }
@@ -806,8 +837,15 @@ class KrishivantriViewModel(application: Application) : AndroidViewModel(applica
     fun refreshPilotSync() {
         val pilotId = _currentUser.value?.id ?: return
         viewModelScope.launch {
-            runCatching { repository.syncPilotStateFromSupabase(pilotId) }
-            _snackbarMessage.value = "Synced latest spray bookings from cloud."
+            when (repository.syncPilotStateFromSupabase(pilotId)) {
+                is CloudSyncResult.Success -> {
+                    _snackbarMessage.value = "Latest spray bookings updated."
+                }
+                CloudSyncResult.NotConfigured,
+                is CloudSyncResult.Error -> {
+                    _snackbarMessage.value = "Unable to refresh right now. Please try again."
+                }
+            }
         }
     }
 

@@ -42,11 +42,14 @@ class MainActivity : ComponentActivity(), PaymentResultWithDataListener {
         super.onCreate(savedInstanceState)
         KrishivantriRuntimeConfig.configure(
             apiBaseUrl = BuildConfig.API_BASE_URL,
-            supabaseUrl = BuildConfig.SUPABASE_URL,
+            supabaseUrl = BuildConfig.SUPABASE_URL
+                .takeIf { it.isNotBlank() && !it.contains("your-project") }
+                ?: KrishivantriRuntimeConfig.supabaseUrl,
             supabaseAnonKey = BuildConfig.SUPABASE_ANON_KEY,
             razorpayKeyId = BuildConfig.RAZORPAY_KEY_ID,
             satelliteTileUrl = BuildConfig.SATELLITE_TILE_URL,
-            satelliteApiKey = BuildConfig.SATELLITE_API_KEY
+            satelliteApiKey = BuildConfig.SATELLITE_API_KEY,
+            isDebugLogging = BuildConfig.DEBUG
         )
         runCatching { MapLibre.getInstance(applicationContext) }
         enableEdgeToEdge()
@@ -147,8 +150,7 @@ fun KrishivantriPilotApp(
                 AuthScreen(
                     state = authState,
                     onToggleSignUp = viewModel::toggleAuthMode,
-                    onSubmitPilot = viewModel::submitPilotAuth,
-                    onSubmitAdmin = viewModel::submitAdminLogin
+                    onSubmitPilot = viewModel::submitPilotAuth
                 )
             } else {
                 when (UserRole.fromApi(user.role)) {
@@ -184,7 +186,8 @@ fun KrishivantriPilotApp(
                         onCompleteOrder = viewModel::completeOrder,
                         onOpenWalletTopUp = viewModel::openWalletTopUp,
                         onUpdateAccountDetails = viewModel::updatePilotAccountDetails,
-                        onSignOut = viewModel::signOut
+                        onSignOut = viewModel::signOut,
+                        onSilentSync = viewModel::syncPilotSilently
                     )
                 }
             }

@@ -276,13 +276,8 @@ fun RazorpayCheckoutSheet(
                     tint = EmeraldPulse,
                     modifier = Modifier.size(16.dp)
                 )
-                val gatewayLabel = if (com.example.data.remote.KrishivantriRuntimeConfig.isRazorpayConfigured()) {
-                    "Razorpay Checkout SDK • Encrypted UPI & Cards"
-                } else {
-                    "Set RAZORPAY_KEY_ID in AI Studio Secrets to launch live Razorpay Checkout"
-                }
                 Text(
-                    text = gatewayLabel,
+                    text = "Razorpay Checkout SDK • Encrypted UPI & Cards",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

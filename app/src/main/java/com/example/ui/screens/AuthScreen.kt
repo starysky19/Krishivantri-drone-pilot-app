@@ -82,7 +82,6 @@ import com.example.ui.viewmodel.AuthUiState
  * Dedicated Drone Pilot Login / Registration screen for the standalone
  * "Krishivantri Drone Pilot" app.
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun AuthScreen(
     state: AuthUiState,
@@ -95,7 +94,6 @@ fun AuthScreen(
         licenseUri: String,
         bankUpiId: String
     ) -> Unit,
-    onSubmitAdmin: (phone: String, passcode: String, onError: (String) -> Unit) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var name by rememberSaveable { mutableStateOf("") }
@@ -104,7 +102,6 @@ fun AuthScreen(
     var tankCapacityText by rememberSaveable { mutableStateOf("10") }
     var bankUpiId by rememberSaveable { mutableStateOf("") }
     var licenseUri by rememberSaveable { mutableStateOf("") }
-    var showHiddenAdminDialog by remember { mutableStateOf(false) }
 
     val licensePhotoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -248,7 +245,9 @@ fun AuthScreen(
 
                     OutlinedTextField(
                         value = phone,
-                        onValueChange = { if (it.length <= 15) phone = it },
+                        onValueChange = { input ->
+                            phone = input.filter(Char::isDigit).take(15)
+                        },
                         label = { Text("Pilot Mobile Number") },
                         leadingIcon = { Icon(Icons.Rounded.Phone, contentDescription = null) },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
@@ -429,10 +428,6 @@ fun AuthScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .combinedClickable(
-                        onClick = {},
-                        onLongClick = { showHiddenAdminDialog = true }
-                    )
                     .padding(vertical = 8.dp),
                 contentAlignment = Alignment.Center
             ) {
@@ -443,13 +438,6 @@ fun AuthScreen(
                 )
             }
         }
-    }
-
-    if (showHiddenAdminDialog) {
-        PilotHiddenAdminDialog(
-            onSubmit = onSubmitAdmin,
-            onDismiss = { showHiddenAdminDialog = false }
-        )
     }
 }
 
@@ -479,65 +467,4 @@ private fun PilotAuthTab(
             )
         }
     }
-}
-
-@Composable
-private fun PilotHiddenAdminDialog(
-    onSubmit: (phone: String, passcode: String, onError: (String) -> Unit) -> Unit,
-    onDismiss: () -> Unit
-) {
-    var adminPhone by remember { mutableStateOf("") }
-    var passcode by remember { mutableStateOf("") }
-    var errorText by remember { mutableStateOf<String?>(null) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text(
-                text = "Restricted Operations Access",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedTextField(
-                    value = adminPhone,
-                    onValueChange = { adminPhone = it },
-                    label = { Text("Admin Identifier") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = passcode,
-                    onValueChange = { passcode = it },
-                    label = { Text("Security Passcode") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                val err = errorText
-                if (!err.isNullOrBlank()) {
-                    Text(
-                        text = err,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = AlertRust
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = { onSubmit(adminPhone, passcode) { msg -> errorText = msg } },
-                colors = ButtonDefaults.buttonColors(containerColor = ForestGreen)
-            ) {
-                Text("Authenticate")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
-        }
-    )
 }

@@ -141,7 +141,8 @@ fun PilotDashboardScreen(
     onOpenWalletTopUp: (Double) -> Unit,
     onUpdateAccountDetails: (String, DroneType, String, String, String?) -> Unit,
     onSignOut: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onSilentSync: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -178,7 +179,10 @@ fun PilotDashboardScreen(
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_RESUME -> onResumeGpsUpdates(true)
+                Lifecycle.Event.ON_RESUME -> {
+                    onResumeGpsUpdates(true)
+                    onSilentSync()
+                }
                 Lifecycle.Event.ON_PAUSE -> onPauseGpsUpdates()
                 else -> Unit
             }
@@ -271,7 +275,7 @@ fun PilotDashboardScreen(
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Refresh,
-                            contentDescription = "Sync orders from cloud",
+                            contentDescription = "Refresh spray bookings",
                             tint = ForestGreen
                         )
                     }

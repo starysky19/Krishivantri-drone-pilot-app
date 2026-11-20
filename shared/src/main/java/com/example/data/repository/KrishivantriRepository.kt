@@ -27,6 +27,7 @@ import com.example.data.remote.SupabaseOrderRatingPatchDto
 import com.example.data.remote.SupabasePilotProfileDto
 import com.example.data.remote.SupabaseUserDto
 import com.example.domain.GeoPolygonCalculator
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -51,6 +52,12 @@ sealed class AcceptOrderResult {
     data class Error(val message: String) : AcceptOrderResult()
 }
 
+sealed class CloudSyncResult {
+    data object NotConfigured : CloudSyncResult()
+    data class Success(val syncedOrders: Int) : CloudSyncResult()
+    data class Error(val message: String) : CloudSyncResult()
+}
+
 class KrishivantriRepository(private val database: KrishivantriDatabase) {
 
     private val dao = database.dao()
@@ -59,22 +66,19 @@ class KrishivantriRepository(private val database: KrishivantriDatabase) {
     private var lastPilotLocationPushMs: Long = 0L
 
     companion object {
-        const val ADMIN_PHONE = "9999000000"
-        const val ADMIN_PASSCODE = "KRISHI-ADMIN-2026"
+        private val VALID_PHONE_REGEX = Regex("^[0-9]{10,15}$")
+        private val VALID_ID_REGEX = Regex("^[a-zA-Z0-9_-]{1,128}$")
     }
 
-    suspend fun ensureAdminSeeded() {
-        val existing = dao.getUserByPhone(ADMIN_PHONE)
-        if (existing == null) {
-            dao.insertUser(
-                UserEntity(
-                    id = "admin-root-001",
-                    phone = ADMIN_PHONE,
-                    name = "Krishivantri Operations Admin",
-                    role = UserRole.ADMIN.apiValue
-                )
-            )
-        }
+    private fun normalizePhoneOrNull(raw: String): String? {
+        val digitsOnly = raw.trim().filter(Char::isDigit)
+        return digitsOnly.takeIf { VALID_PHONE_REGEX.matches(it) }
+    }
+
+    private fun isSafeIdentifier(id: String): Boolean = VALID_ID_REGEX.matches(id)
+
+    suspend fun verifyLocalDatabaseReady() {
+        dao.getUserById("__db_health_check__")
     }
 
     suspend fun registerFarmer(
@@ -82,7 +86,8 @@ class KrishivantriRepository(private val database: KrishivantriDatabase) {
         phone: String,
         farmerIdNumber: String
     ): AuthResult {
-        val cleanPhone = phone.trim()
+        val cleanPhone = normalizePhoneOrNull(phone)
+            ?: return AuthResult.Error("Enter a valid 10 to 15-digit mobile number.")
         val existing = dao.getUserByPhone(cleanPhone)
         if (existing != null) {
             return AuthResult.Error("Mobile number already registered. Please sign in.")
@@ -135,13 +140,42 @@ class KrishivantriRepository(private val database: KrishivantriDatabase) {
         licenseDocumentUri: String,
         bankUpiId: String
     ): AuthResult {
-        val cleanPhone = phone.trim()
+        val cleanPhone = normalizePhoneOrNull(phone)
+            ?: return AuthResult.Error("Enter a valid 10 to 15-digit contact number.")
+        if (tankCapacity !in 1.0..200.0) {
+            return AuthResult.Error("Enter a valid spray tank capacity (1–200 liters).")
+        }
         val existing = dao.getUserByPhone(cleanPhone)
         if (existing != null) {
             return AuthResult.Error("Contact number already registered. Please sign in.")
         }
+
+        // Check if this phone already exists in Supabase so we avoid duplicate-phone conflicts
+        var resolvedUserId = UUID.randomUUID().toString()
+        val remoteCheckError = withContext(Dispatchers.IO) {
+            runCatching {
+                val api = SupabaseClient.api ?: return@runCatching null
+                val resp = api.getUsersByPhone("eq.$cleanPhone")
+                val remoteUser = resp.body()?.firstOrNull() ?: return@runCatching null
+                if (!remoteUser.role.equals(UserRole.PILOT.apiValue, ignoreCase = true)) {
+                    return@runCatching "This mobile number is already registered under another account."
+                }
+                val profileResp = api.getPilotProfile("eq.${remoteUser.id}")
+                if (!profileResp.body().isNullOrEmpty()) {
+                    return@runCatching "Contact number already registered. Please sign in."
+                }
+                if (isSafeIdentifier(remoteUser.id)) {
+                    resolvedUserId = remoteUser.id
+                }
+                null
+            }.getOrNull()
+        }
+        if (remoteCheckError != null) {
+            return AuthResult.Error(remoteCheckError)
+        }
+
         val user = UserEntity(
-            id = UUID.randomUUID().toString(),
+            id = resolvedUserId,
             phone = cleanPhone,
             name = name.trim(),
             role = UserRole.PILOT.apiValue
@@ -165,7 +199,7 @@ class KrishivantriRepository(private val database: KrishivantriDatabase) {
         withContext(Dispatchers.IO) {
             runCatching {
                 SupabaseClient.api?.let { api ->
-                    api.upsertUser(
+                    val userResp = api.upsertUser(
                         SupabaseUserDto(
                             id = user.id,
                             phone = user.phone,
@@ -174,7 +208,14 @@ class KrishivantriRepository(private val database: KrishivantriDatabase) {
                             created_at = user.createdAt
                         )
                     )
-                    api.upsertPilotProfile(profile.toSupabaseDto())
+                    if (userResp.isSuccessful) {
+                        api.upsertPilotProfile(profile.toSupabaseDto())
+                    } else {
+                        val existingRemote = api.getUsersByPhone("eq.${user.phone}").body()?.firstOrNull()
+                        if (existingRemote != null && existingRemote.role.equals(UserRole.PILOT.apiValue, ignoreCase = true)) {
+                            api.upsertPilotProfile(profile.copy(userId = existingRemote.id).toSupabaseDto())
+                        }
+                    }
                 }
             }
         }
@@ -182,7 +223,8 @@ class KrishivantriRepository(private val database: KrishivantriDatabase) {
     }
 
     suspend fun loginByRole(phone: String, expectedRole: UserRole): AuthResult {
-        val cleanPhone = phone.trim()
+        val cleanPhone = normalizePhoneOrNull(phone)
+            ?: return AuthResult.Error("Enter a valid 10 to 15-digit mobile number.")
         var user = dao.getUserByPhone(cleanPhone)
         if (user == null) {
             // Hydrate from Supabase if user exists on cloud DB
@@ -191,6 +233,7 @@ class KrishivantriRepository(private val database: KrishivantriDatabase) {
                     val api = SupabaseClient.api ?: return@runCatching null
                     val resp = api.getUsersByPhone("eq.$cleanPhone")
                     val remoteUser = resp.body()?.firstOrNull() ?: return@runCatching null
+                    if (!isSafeIdentifier(remoteUser.id)) return@runCatching null
                     val entity = UserEntity(
                         id = remoteUser.id,
                         phone = remoteUser.phone,
@@ -230,13 +273,7 @@ class KrishivantriRepository(private val database: KrishivantriDatabase) {
     }
 
     suspend fun loginAdmin(phone: String, passcode: String): AuthResult {
-        ensureAdminSeeded()
-        val cleanPhone = phone.trim()
-        val user = dao.getUserByPhone(cleanPhone)
-        if (user == null || user.role != UserRole.ADMIN.apiValue || passcode.trim() != ADMIN_PASSCODE) {
-            return AuthResult.Error("Invalid administrator credentials.")
-        }
-        return AuthResult.Success(user)
+        return AuthResult.Error("Operations admin access is disabled in the public Pilot app.")
     }
 
     fun observeFarmerProfile(farmerId: String): Flow<FarmerProfileEntity?> =
@@ -518,26 +555,64 @@ class KrishivantriRepository(private val database: KrishivantriDatabase) {
         }
     }
 
-    suspend fun syncPilotStateFromSupabase(pilotId: String) = withContext(Dispatchers.IO) {
-        val api = SupabaseClient.api ?: return@withContext
-        runCatching {
-            api.getPilotProfile("eq.$pilotId").body()?.firstOrNull()?.let { pp ->
+    suspend fun syncPilotStateFromSupabase(pilotId: String): CloudSyncResult = withContext(Dispatchers.IO) {
+        val api = SupabaseClient.api ?: return@withContext CloudSyncResult.NotConfigured
+        try {
+            val profileResp = api.getPilotProfile("eq.$pilotId")
+            if (!profileResp.isSuccessful) {
+                return@withContext CloudSyncResult.Error("Sync temporarily unavailable")
+            }
+            val remoteProfile = profileResp.body()?.firstOrNull()
+            if (remoteProfile == null) {
+                var targetUserId = pilotId
+                val localUser = dao.getUserById(pilotId)
+                if (localUser != null) {
+                    val userResp = api.upsertUser(
+                        SupabaseUserDto(
+                            id = localUser.id,
+                            phone = localUser.phone,
+                            name = localUser.name,
+                            role = localUser.role,
+                            created_at = localUser.createdAt
+                        )
+                    )
+                    if (!userResp.isSuccessful) {
+                        val existingRemote = api.getUsersByPhone("eq.${localUser.phone}")
+                            .body()?.firstOrNull()
+                        if (existingRemote != null && existingRemote.role.equals(UserRole.PILOT.apiValue, ignoreCase = true)) {
+                            targetUserId = existingRemote.id
+                        }
+                    }
+                }
+                dao.getPilotProfile(pilotId)?.let { local ->
+                    api.upsertPilotProfile(local.copy(userId = targetUserId).toSupabaseDto())
+                }
+            } else {
                 val local = dao.getPilotProfile(pilotId)
                 if (local == null) {
-                    dao.insertPilotProfile(pp.toEntity())
+                    dao.insertPilotProfile(remoteProfile.toEntity())
                 } else {
                     dao.updatePilotProfile(
                         local.copy(
-                            isLicenseVerified = pp.is_license_verified,
-                            ratingAverage = pp.rating_average,
-                            ratingCount = pp.rating_count
+                            isLicenseVerified = remoteProfile.is_license_verified,
+                            ratingAverage = remoteProfile.rating_average,
+                            ratingCount = remoteProfile.rating_count
                         )
                     )
                 }
             }
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Throwable) {
+            return@withContext CloudSyncResult.Error("Sync temporarily unavailable")
         }
-        runCatching {
-            val orders = api.getRecentOrders().body().orEmpty()
+
+        return@withContext try {
+            val ordersResp = api.getRecentOrders()
+            if (!ordersResp.isSuccessful) {
+                return@withContext CloudSyncResult.Error("Sync temporarily unavailable")
+            }
+            val orders = ordersResp.body().orEmpty()
             orders.forEach { dto ->
                 val poly = dto.field_polygon_coordinates.map { LatLngPoint(it.lat, it.lng) }
                 dao.insertOrder(
@@ -579,6 +654,11 @@ class KrishivantriRepository(private val database: KrishivantriDatabase) {
                     }
                 }
             }
+            CloudSyncResult.Success(orders.size)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Throwable) {
+            CloudSyncResult.Error("Sync temporarily unavailable")
         }
     }
 
@@ -700,7 +780,7 @@ class KrishivantriRepository(private val database: KrishivantriDatabase) {
     }
 
     suspend fun topUpPilotWallet(pilotId: String, amount: Double) {
-        if (amount <= 0.0) return
+        if (amount !in 1.0..100_000.0) return
         var updatedProfile: PilotProfileEntity? = null
         database.withTransaction {
             val profile = dao.getPilotProfile(pilotId) ?: return@withTransaction
